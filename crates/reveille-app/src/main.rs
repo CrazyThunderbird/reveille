@@ -63,6 +63,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
+#[cfg(windows)]
+use tauri_plugin_notification::NotificationExt as _;
 use thiserror::Error;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{info, warn};
@@ -75,6 +77,8 @@ const INSTALL_EVENT: &str = "reveille://install";
 const OPENMOHAA_INSTALL_EVENT: &str = "reveille://openmohaa-install";
 const REBORN_INSTALL_EVENT: &str = "reveille://reborn-install";
 const INSTALLATION_COPY_EVENT: &str = "reveille://installation-copy";
+#[cfg(not(windows))]
+const PLAYER_ALERT_OPEN_EVENT: &str = "reveille://player-alert-open";
 const APP_LOG_FILENAME: &str = "reveille.log";
 const PREVIOUS_APP_LOG_FILENAME: &str = "reveille.previous.log";
 
@@ -1424,6 +1428,97 @@ async fn check_server(
     })
 }
 
+/// Read only the player count for an explicitly monitored endpoint. Unlike `check_server`, this
+/// does not index maps or alter the browse list behind a pending join.
+#[tauri::command]
+async fn probe_player_count(address: String, query_port: u16, game: TargetGame) -> Option<u32> {
+    let address = address.parse::<SocketAddrV4>().ok()?;
+    if query_port == 0 {
+        return None;
+    }
+    let endpoint = MasterEndpoint {
+        address: *address.ip(),
+        query_port: QueryPort::new(query_port),
+    };
+    let server = discovery::inspect_endpoint(endpoint, PROBE_TIMEOUT)
+        .await
+        .server?;
+    if answered_for_another_game(&server, game).is_some()
+        || SocketAddrV4::new(server.endpoint.address, server.game_port.get()) != address
+    {
+        return None;
+    }
+    server
+        .occupancy
+        .clients_reported
+        .map(discovery::ClientsReported::get)
+}
+
+#[cfg(not(windows))]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayerAlertOpen {
+    event_id: String,
+}
+
+#[tauri::command]
+async fn send_player_notification(
+    app: tauri::AppHandle,
+    event_id: String,
+    hostname: String,
+    count: u32,
+) -> Result<(), String> {
+    if event_id.len() > 64 || event_id.is_empty() || count == 0 || hostname.len() > 256 {
+        return Err("Invalid player alert".into());
+    }
+    let title = format!(
+        "{count} {} on {hostname}",
+        if count == 1 { "player" } else { "players" }
+    );
+    #[cfg(windows)]
+    {
+        let _ = event_id;
+        app.notification()
+            .builder()
+            .title(title)
+            .body("A server you follow is no longer empty.")
+            .show()
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(windows))]
+    tokio::task::spawn_blocking(move || {
+        let mut notification = notify_rust::Notification::new();
+        notification
+            .summary(&title)
+            .body("A server you follow is no longer empty.")
+            .auto_icon();
+        #[cfg(target_os = "macos")]
+        {
+            let _ = notify_rust::set_application(if tauri::is_dev() {
+                "com.apple.Terminal"
+            } else {
+                &app.config().identifier
+            });
+        }
+        let handle = notification.show().map_err(|error| error.to_string())?;
+        std::thread::spawn(move || {
+            let _ = handle.wait_for_response(|response: &notify_rust::NotificationResponse| {
+                if !matches!(response, notify_rust::NotificationResponse::Default) {
+                    return;
+                }
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                let _ = app.emit(PLAYER_ALERT_OPEN_EVENT, PlayerAlertOpen { event_id });
+            });
+        });
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// The family a checked server belongs to, when it is not this session's.
 ///
 /// A bookmark is an address, so it outlives the game it was starred under. A server that answers
@@ -2381,6 +2476,7 @@ fn main() {
     )]
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_updater::Builder::new()
@@ -2422,6 +2518,8 @@ fn main() {
             cancel_browse,
             browse_servers,
             check_server,
+            probe_player_count,
+            send_player_notification,
             preview_join,
             install_server_files,
             install_and_launch,

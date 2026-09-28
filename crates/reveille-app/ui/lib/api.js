@@ -22,6 +22,7 @@
 //   browse_servers(session)                    -> BrowserPayload
 //   cancel_browse()                            -> void
 //   check_server(session, address, queryPort)  -> CheckResult
+//   probe_player_count(address, queryPort, game) -> number | null
 //   preview_join(session, address)             -> JoinPreview
 //   install_server_files(session, address)     -> ServerFilesResult
 //   install_and_launch(session, address, selectedCandidateIds, acceptIncomplete) -> JoinResult
@@ -89,6 +90,34 @@ export const cancelBrowse = () => invoke("cancel_browse");
  */
 export const checkServer = (session, address, queryPort) =>
   invoke("check_server", { session, address, queryPort });
+
+export const probePlayerCount = ({ address, queryPort, game }) =>
+  invoke("probe_player_count", { address, queryPort, game });
+
+export const onPlayerNotificationClick = (handler) =>
+  on("reveille://player-alert-open", handler);
+
+export const focusReveille = () => tauri.window.getCurrentWindow().setFocus();
+
+export const requestPlayerAlertAttention = () =>
+  tauri.window.getCurrentWindow().requestUserAttention(tauri.window.UserAttentionType.Informational);
+
+export const clearPlayerAlertAttention = () =>
+  tauri.window.getCurrentWindow().requestUserAttention(null);
+
+export const canNotify = () => tauri.notification.isPermissionGranted();
+
+export const notificationPermission = async () => {
+  if (await canNotify()) return true;
+  return (await tauri.notification.requestPermission()) === "granted";
+};
+
+export const sendPlayerNotification = (event) =>
+  invoke("send_player_notification", {
+    eventId: event.id,
+    hostname: event.hostname,
+    count: event.count,
+  });
 
 export const previewJoin = (session, address) => invoke("preview_join", { session, address });
 
