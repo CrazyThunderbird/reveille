@@ -7,7 +7,7 @@
 // Commands (crates/reveille-app/src/main.rs):
 //   detect_install(selectedPath?)              -> Installation | null
 //     Installation.products is what is on disk; Installation.playable is what can be run — an
-//     expansion needs the base game underneath it (rules H13/H14). Offer `playable`.
+//     expansion needs the base game underneath it. Offer `playable`.
 //   openmohaa_status(path, channel)            -> OpenMohaaStatus
 //   install_openmohaa(path, offerId)           -> OpenMohaaInstallResult
 //   cancel_openmohaa_install()                 -> void
@@ -22,7 +22,8 @@
 //   browse_servers(session)                    -> BrowserPayload
 //   cancel_browse()                            -> void
 //   check_server(session, address, queryPort)  -> CheckResult
-//   probe_player_count(address, queryPort, game) -> number | null
+//   read_watched_server(address, queryPort, game) -> { clients, bots, map, mode, round_trip } | null
+//   game_client_running()                      -> boolean | null
 //   preview_join(session, address)             -> JoinPreview
 //   install_server_files(session, address)     -> ServerFilesResult
 //   install_and_launch(session, address, selectedCandidateIds, acceptIncomplete) -> JoinResult
@@ -91,11 +92,15 @@ export const cancelBrowse = () => invoke("cancel_browse");
 export const checkServer = (session, address, queryPort) =>
   invoke("check_server", { session, address, queryPort });
 
-export const probePlayerCount = ({ address, queryPort, game }) =>
-  invoke("probe_player_count", { address, queryPort, game });
+export const readWatchedServer = ({ address, queryPort, game }) =>
+  invoke("read_watched_server", { address, queryPort, game });
+
+export const gameClientRunning = () => invoke("game_client_running");
 
 export const onPlayerNotificationClick = (handler) =>
   on("reveille://player-alert-open", handler);
+
+export const appVersion = async () => tauri.app.getVersion();
 
 export const focusReveille = () => tauri.window.getCurrentWindow().setFocus();
 
@@ -117,6 +122,7 @@ export const sendPlayerNotification = (event) =>
     eventId: event.id,
     hostname: event.hostname,
     count: event.count,
+    detail: event.detail ?? null,
   });
 
 export const previewJoin = (session, address) => invoke("preview_join", { session, address });
@@ -162,7 +168,7 @@ export function errorText(error) {
  *
  * `{ kind, detail }`, where `kind` is decided in Rust beside the errors it names — the shell must
  * never read a cause out of a formatted message, which is how "no internet" and "the master sent
- * nonsense" ended up as the same unreadable line (docs/design-review.md F6). Anything else that
+ * nonsense" ended up as the same unreadable line. Anything else that
  * reaches this is carried through as `internal` with its own message intact.
  */
 export function browseFailure(error) {

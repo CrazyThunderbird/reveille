@@ -7,12 +7,12 @@
 // maps, No download for N maps, Map list not published — because this is where
 // the decision is made. The list deliberately does not repeat them as badges.
 // Each name states what Reveille measured rather than how confident it feels
-// about it (lib/format.js `stateName`, docs/ux-standards.md §1.1).
+// about it (lib/format.js `stateName`).
 //
 // The fourth, Compatible, is rendered nowhere. A ready server has nothing to
 // qualify, and a heading reading `Compatible` above a button reading `Join`
 // restates the control beneath it. Silence is the correct rendering of "nothing
-// to do" (docs/ui.md §9).
+// to do".
 //
 // The join gate is about the map running *now*, not the whole rotation. A server
 // with one unobtainable map later in its rotation is perfectly playable until it
@@ -24,16 +24,24 @@ import { el, fill, frag, preserveFocus } from "../lib/dom.js";
 import {
   bytes,
   displayPath,
+  engineLabel,
+  gameType,
   launchedLabel,
   mapKey,
   mapName,
   nonResultReason,
+  occupancy,
+  occupancyText,
   plural,
+  roundTrip,
+  shortVersion,
   stateExplanation,
   stateName,
 } from "../lib/format.js";
 import { historyByAddress, isFavorite, toggleFavorite } from "../lib/bookmarks.js";
-import { hasPlayerAlert } from "../lib/player-alerts.js";
+import { icon } from "../lib/icons.js";
+import { THRESHOLDS, playerAlert, setAlertThreshold } from "../lib/player-alerts.js";
+import { closePopover, openPopover } from "../lib/popover.js";
 import {
   GAME_LABELS,
   canRecheck,
@@ -45,8 +53,13 @@ import {
 
 export function joinView(root, { onInstallServerFiles, onJoin, onRecheck, onTogglePlayerAlert }) {
   const scroll = el("div", { className: "detail-pane__scroll" });
+  // Rendered inside the scroll, right under what it acts on, and sticky so a long list of choices
+  // cannot push it out of reach.
   const actions = el("div", { className: "actions" });
-  fill(root, scroll, actions);
+  fill(root, scroll);
+  // Set by a double-click or Enter on a row that needs something first. Join is disabled while the
+  // downloads are being priced, so focus waits for the first render where it can land.
+  let focusJoinFor = null;
 
   const render = () => {
     const row = selectedRow();
@@ -55,23 +68,38 @@ export function joinView(root, { onInstallServerFiles, onJoin, onRecheck, onTogg
     const gone = !row && state.selected ? state.checks.get(state.selected) : null;
     if (!row && !gone?.dropped) {
       fill(scroll, idlePlaceholder());
-      fill(actions);
-      actions.classList.add("hidden");
       return;
     }
-    actions.classList.remove("hidden");
     preserveFocus(root, () => {
-      fill(scroll, row ? body(row, onRecheck, onTogglePlayerAlert) : gonePane(state.selected, gone));
       fill(
         actions,
         ...(row
           ? actionBar(row, onInstallServerFiles, onJoin)
           : goneActions(state.selected, gone, onRecheck)),
       );
+      fill(
+        scroll,
+        row
+          ? body(row, actions, onRecheck, onTogglePlayerAlert)
+          : frag(gonePane(state.selected, gone), actions),
+      );
     });
+    if (focusJoinFor !== null) {
+      const join = actions.querySelector('[data-focus-key="join"]');
+      if (focusJoinFor !== row?.address) focusJoinFor = null;
+      else if (join && !join.disabled) {
+        focusJoinFor = null;
+        join.focus();
+      }
+    }
   };
 
-  return { render };
+  const focusJoin = (address) => {
+    focusJoinFor = address;
+    render();
+  };
+
+  return { render, focusJoin };
 }
 
 function idlePlaceholder() {
@@ -83,7 +111,7 @@ function idlePlaceholder() {
   );
 }
 
-function body(row, onRecheck, onTogglePlayerAlert) {
+function body(row, actions, onRecheck, onTogglePlayerAlert) {
   const { server, compatibility } = row;
   const preview = state.preview?.address === row.address ? state.preview : null;
   const assessment = preview?.assessment ?? compatibility;
@@ -91,83 +119,286 @@ function body(row, onRecheck, onTogglePlayerAlert) {
   const result = state.joinResult?.address === row.address ? state.joinResult : null;
 
   return frag(
-    header(row, server, onRecheck, onTogglePlayerAlert),
+    header(row, server, onTogglePlayerAlert),
     facts(server),
     result ? outcomeSection(result) : null,
     run ? installSection(run) : null,
     !run && !result ? needsSection(assessment, preview, server) : null,
+    actions,
+    freshness(row, onRecheck),
+    more(row, server),
   );
 }
 
-function header(row, server, onRecheck, onTogglePlayerAlert) {
+function header(row, server, onTogglePlayerAlert) {
   const starred = isFavorite(row.address);
-  const alerted = hasPlayerAlert(state.game, row.address);
-  const launched = launchedLabel(historyByAddress().get(row.address));
+  const watch = playerAlert(state.game, row.address);
+  const watched = Boolean(watch);
+  const name = server.hostname || "(unnamed server)";
   return el(
     "div",
     { className: "detail__head" },
-    el("p", { className: "label" }, "Server"),
+    el("h2", { className: "detail__title", title: name }, name),
     el(
       "div",
-      { className: "detail__title-row" },
-      el("h2", { className: "detail__title" }, server.hostname || "(unnamed server)"),
-      el("div", { className: "detail__server-controls" },
+      { className: "detail__marks" },
+      markToggle({
+        kind: "star",
+        on: starred,
+        label: "Favorite",
+        focusKey: "detail-star",
+        title: starred ? "Remove from Favorites (F)" : "Keep this server in Favorites (F)",
+        onclick: () => {
+          toggleFavorite(row);
+          update(() => {});
+        },
+      }),
+      markToggle({
+        kind: "bell",
+        on: watched,
+        label: watched ? "Watching" : "Watch",
+        focusKey: "detail-player-alert",
+        title: watched
+          ? "Stop notifying me about this server (W)"
+          : "Notify me when players join this server (W)",
+        onclick: () => void onTogglePlayerAlert(row),
+      }),
+      watched &&
         el(
           "button",
           {
             type: "button",
-            className: "star star--lg",
-            dataset: { focusKey: "detail-star" },
-            "aria-pressed": starred ? "true" : "false",
-            "aria-label": `Favorite ${server.hostname || row.address}`,
-            title: starred ? "Remove from favorites" : "Add to favorites",
-            onclick: () => {
-              toggleFavorite(row);
-              update(() => {});
-            },
+            className: "mark-toggle mark-toggle--rule",
+            dataset: { focusKey: "detail-watch-rule" },
+            "aria-haspopup": "dialog",
+            "aria-expanded": "false",
+            "aria-label": `Watch rule: notify at ${watch.threshold} ${watch.threshold === 1 ? "player" : "players"}`,
+            title: "When to notify",
+            onclick: (event) => openWatchRule(event.currentTarget, row, watch, onTogglePlayerAlert),
           },
-          starred ? "★" : "☆",
+          `${watch.threshold}+`,
+          el("span", { className: "mark-toggle__caret", "aria-hidden": "true" }, "▾"),
         ),
-        el("button", {
-          type: "button",
-          className: "star star--lg player-alert-bell",
-          dataset: { focusKey: "detail-player-alert" },
-          "aria-pressed": alerted ? "true" : "false",
-          "aria-label": `${alerted ? "Turn off" : "Turn on"} player alerts for ${server.hostname || row.address}`,
-          title: alerted ? "Turn off player alerts" : "Notify me when players join",
-          onclick: () => void onTogglePlayerAlert(row),
-        }, "🔔"),
-      ),
     ),
-    el("p", { className: "data quiet selectable" }, row.address),
-    // What Reveille did, not what the server did: it started the game and saw it start. Whether
-    // this server admitted the player is decided at connect time and never observed (H12).
-    launched &&
-      el(
-        "p",
-        {
-          className: "quiet",
-          title:
-            "Reveille started the game connecting to this server. Whether the server let you in is not something Reveille can see.",
-        },
-        launched,
-      ),
-    freshness(row, onRecheck),
   );
 }
 
+/** The watch's one rule: how many players make it worth a notification. Bots never count. */
+function openWatchRule(anchor, row, watch, onTogglePlayerAlert) {
+  const choose = (threshold) => {
+    setAlertThreshold(state.game, row.address, threshold);
+    closePopover({ restoreFocus: true });
+    update(() => {});
+  };
+  openPopover(
+    anchor,
+    "Watch rule",
+    el("div", { className: "popover__head" }, el("h2", { className: "popover__title" }, "Notify me when")),
+    el(
+      "div",
+      { className: "watch-rule" },
+      el("p", { className: "watch-rule__label" }, "players reach"),
+      el(
+        "div",
+        { className: "watch-rule__choices", role: "radiogroup", "aria-label": "Players needed" },
+        THRESHOLDS.map((threshold) =>
+          el(
+            "button",
+            {
+              type: "button",
+              role: "radio",
+              className: "watch-rule__choice",
+              "aria-checked": String(threshold === watch.threshold),
+              onclick: () => choose(threshold),
+            },
+            String(threshold),
+          ),
+        ),
+      ),
+      el("p", { className: "quiet" }, "Bots are not counted."),
+    ),
+    el(
+      "div",
+      { className: "popover__foot" },
+      el(
+        "button",
+        {
+          type: "button",
+          className: "btn btn--sm btn--utility",
+          onclick: () => {
+            closePopover();
+            void onTogglePlayerAlert(row);
+          },
+        },
+        "Stop watching",
+      ),
+    ),
+  );
+}
+
+function markToggle({ kind, on, label, focusKey, title, onclick }) {
+  return el(
+    "button",
+    {
+      type: "button",
+      className: `mark-toggle mark-toggle--${kind}`,
+      dataset: { focusKey },
+      "aria-pressed": on ? "true" : "false",
+      title,
+      onclick,
+    },
+    icon(kind, { outline: !on }),
+    label,
+  );
+}
+
+/** The six figures a player compares servers by, laid out two rows of three. */
+function facts(server) {
+  const counts = occupancy(server);
+  const ping = roundTrip(server);
+  const mode = gameType(server);
+  const full = counts.capacity && counts.clients >= counts.capacity;
+  return el(
+    "dl",
+    { className: "facts" },
+    fact(
+      "Players",
+      counts.clients === null
+        ? "—"
+        : [
+            el("strong", { className: full ? "facts__full" : null }, String(counts.clients)),
+            counts.capacity ? `/${counts.capacity}` : "",
+          ],
+      occupancyText(counts),
+    ),
+    fact("Bots", counts.bots ? String(counts.bots) : "none"),
+    fact(
+      "Ping",
+      ping.band
+        ? [el("span", { className: `ping-dot ping-dot--${ping.band}`, "aria-hidden": "true" }), ping.text]
+        : ping.text,
+      ping.title,
+    ),
+    fact(
+      "Map",
+      server.current_map ? mapName(server.current_map) : "—",
+      server.current_map ? mapName(server.current_map) : "This server did not publish its map.",
+    ),
+    fact("Mode", mode.text, mode.title),
+    fact("Version", shortVersion(server), engineLabel(server)),
+  );
+}
+
+function fact(term, value, title = null) {
+  return el("div", { className: "fact", title }, el("dt", null, term), el("dd", null, value));
+}
+
+// Module state rather than store state: whether the fold is open is a reading preference that
+// should survive selecting another server, and nothing else in the app depends on it.
+let moreOpen = false;
+
+/** Everything about the server that does not decide the join, folded away until asked for. */
+function more(row, server) {
+  return el(
+    "div",
+    { className: "detail__more" },
+    el(
+      "button",
+      {
+        type: "button",
+        className: "detail__more-toggle",
+        "aria-expanded": moreOpen ? "true" : "false",
+        dataset: { focusKey: "detail-more" },
+        onclick: () => {
+          moreOpen = !moreOpen;
+          update(() => {});
+        },
+      },
+      "More about this server",
+    ),
+    moreOpen ? moreFacts(row, server) : null,
+  );
+}
+
+function moreFacts(row, server) {
+  const rotation = server.rotation ?? [];
+  const limits = pingLimits(server);
+  return el(
+    "dl",
+    { className: "kv" },
+    el("dt", null, "Address"),
+    el(
+      "dd",
+      { className: "detail__address" },
+      el("span", { className: "data selectable" }, row.address),
+      el(
+        "button",
+        {
+          type: "button",
+          className: "btn btn--sm",
+          dataset: { focusKey: "detail-copy" },
+          // No failure notice: the clipboard is only unavailable where the address can still be
+          // selected and copied by hand, right beside this button.
+          onclick: (event) => {
+            const button = event.currentTarget;
+            navigator.clipboard
+              ?.writeText(row.address)
+              .then(() => (button.textContent = "Copied"))
+              .catch(() => {});
+          },
+        },
+        "Copy",
+      ),
+    ),
+    el("dt", null, "Map list"),
+    el(
+      "dd",
+      null,
+      rotation.length ? rotation.map((map) => mapName(map)).join(", ") : "not published",
+    ),
+    el("dt", null, "Downloads"),
+    el("dd", null, downloadPolicy(server.allow_download)),
+    el("dt", null, "Checksum"),
+    el(
+      "dd",
+      null,
+      server.map_checksum === null || server.map_checksum === undefined
+        ? "not published, so maps are matched by name only"
+        : "published",
+    ),
+    limits ? el("dt", null, "Ping limit") : null,
+    limits ? el("dd", null, limits) : null,
+    server.reserved_slots ? el("dt", null, "Reserved") : null,
+    server.reserved_slots
+      ? el("dd", null, `${plural(server.reserved_slots, "slot")} held back`)
+      : null,
+    el("dt", null, "Build"),
+    el("dd", null, engineLabel(server)),
+  );
+}
+
+function downloadPolicy(allow) {
+  if (allow === null || allow === undefined) return "not published";
+  return Number(allow) === 0 ? "the server sends no files" : "the server sends missing files";
+}
+
+/** The server's own admission gate, which is not the round trip shown above. */
+function pingLimits(server) {
+  const min = Number(server.minimum_ping) || 0;
+  const max = Number(server.maximum_ping) || 0;
+  if (min > 0 && max > 0) return `${min} to ${max} ms`;
+  if (max > 0) return `up to ${max} ms`;
+  if (min > 0) return `at least ${min} ms`;
+  return null;
+}
+
 /**
- * When this row was measured, and the one control that changes the answer.
- *
- * Every figure above it — the client count, the map, the round trip — was taken at one moment and
- * has been ageing since. Nothing else on screen says which moment, so a server that filled up ten
- * minutes ago still reads as empty. **Check again** asks this one server, and the time is what
- * shows it happened when the answer comes back the same.
- *
- * Hidden while a sweep runs: that is already re-asking every server in the list, this row included.
+ * When this row was measured, and the control that measures it again. Every figure above has been
+ * ageing since, so a server that filled up ten minutes ago would otherwise still read as empty.
+ * Hidden while a sweep runs, which is already re-asking this row.
  */
 function freshness(row, onRecheck) {
-  if (state.browse.running) return null;
+  if (state.browse.running) return launchedLine(row.address);
   const check = state.checks.get(row.address);
   return el(
     "div",
@@ -186,7 +417,7 @@ function freshness(row, onRecheck) {
           // player would lose the caret on every check. `canRecheck` refuses the press instead.
           "aria-disabled": canRecheck(row.address) ? null : "true",
           dataset: { focusKey: "detail-recheck" },
-          title: "Ask this one server again, without re-checking the whole list.",
+          title: "Ask this one server again, without re-checking the whole list (R)",
           onclick: () => onRecheck(row),
         },
         check?.status === "checking" ? "Checking…" : "Check again",
@@ -198,24 +429,29 @@ function freshness(row, onRecheck) {
     check?.status === "failed"
       ? el("p", { className: "error", role: "alert" }, `The check could not run. ${check.error}`)
       : null,
+    launchedLine(row.address),
   );
 }
 
-/**
- * When the figures on this row were measured.
- *
- * A row the sweep returned is timed by when the sweep finished, which is not exactly when that row
- * answered — probes stream in across the whole run — so it is worded as the check it came from
- * rather than as a measurement of this one server. A row a single check re-asked has its own time,
- * and that one can say so plainly.
- */
+function launchedLine(address) {
+  const launched = launchedLabel(historyByAddress().get(address));
+  if (!launched) return null;
+  return el(
+    "p",
+    { className: "quiet", title: "Last time Reveille started the game on this server." },
+    launched,
+  );
+}
+
+// A swept row is timed by when the sweep finished, not when this server answered, so its title
+// says which list it came from.
 function checkedLine(address) {
   const own = state.checkedAt.get(address);
   if (own) {
     return el(
       "p",
       { className: "quiet", title: "This server was asked again then. The figures are that reply." },
-      `Checked at ${own}`,
+      `Updated ${own}`,
     );
   }
   const swept = state.browse.completedAt;
@@ -223,7 +459,7 @@ function checkedLine(address) {
   return el(
     "p",
     { className: "quiet", title: "The figures on this row come from that list, and not since." },
-    `From the server list at ${swept}`,
+    `Updated ${swept}`,
   );
 }
 
@@ -231,7 +467,7 @@ function checkedLine(address) {
  * The selected server, after a check that ran and found it no longer there.
  *
  * The row has left the list, because a check that got no answer is evidence about now and the
- * client count, map and round trip it replaced are not (docs/rules.md H12). Emptying the pane
+ * client count, map and round trip it replaced are not. Emptying the pane
  * instead would lose the player's place and say nothing about why, so what is left is the name it
  * had, the address, what the check found, and the one thing that can change the answer.
  *
@@ -243,7 +479,6 @@ function gonePane(address, check) {
     el(
       "div",
       { className: "detail__head" },
-      el("p", { className: "label" }, "Server"),
       el(
         "h2",
         { className: "detail__title detail__title--remembered" },
@@ -284,35 +519,7 @@ function goneDetail(check, address) {
     return `It now publishes ${check.movedTo} as its game address, which is in the list.`;
   }
   if (check.nonResult) return `This server ${nonResultReason(check.nonResult)}.`;
-  return "This server did not answer.";
-}
-
-/**
- * The facts about this server that the row above does not already carry.
- *
- * The published rotation's *size* used to sit here as a **Map list** row. It went with the
- * rotation listing itself on 27 Aug 2026: how many maps a server intends to play later is not
- * something a player decides on, and in the one case where it mattered — no list published at
- * all — the state below says so in a sentence rather than leaving the reader to infer it from
- * the words "not published" beside a heading.
- */
-function facts(server) {
-  return el(
-    "div",
-    { className: "detail__section" },
-    el(
-      "dl",
-      { className: "kv" },
-      el("dt", null, "Map"),
-      el("dd", null, server.current_map ? mapName(server.current_map) : "not published"),
-      server.reserved_slots
-        ? el("dt", null, "Reserved")
-        : null,
-      server.reserved_slots
-        ? el("dd", null, `${plural(server.reserved_slots, "slot")} held back`)
-        : null,
-    ),
-  );
+  return "This server is offline.";
 }
 
 /**
@@ -323,9 +530,8 @@ function facts(server) {
  * every map already on disk included, under headings that were mostly empty. A ready server —
  * the ordinary case, and the one a player is trying to pick out of the list — drew two headings,
  * a state name and a paragraph of maps it already has, and pushed the address and the freshness
- * line below the fold to do it. docs/ui.md §9 had already ruled on this: *a ready server says
- * nothing; silence is the correct rendering of "nothing to do"*, and an explanation earns a
- * paragraph only if it changes the next click.
+ * line below the fold to do it. A ready server says nothing; silence is the correct rendering of
+ * "nothing to do", and an explanation earns a paragraph only if it changes the next click.
  *
  * So this returns `null` outright for a compatible server with nothing to qualify. What survives
  * is what changes the click: the state and how it was reached, what it costs, and the one choice
@@ -362,7 +568,7 @@ function needsSection(assessment, preview, server) {
     // already reads `Join` is a heading restating the control beneath it.
     explanation ? el("h3", { className: "display heading-sm" }, stateName(assessment.state)) : null,
     // Persistent, not a tooltip: this sentence is what makes the name above it a decision, and a
-    // title is unreachable by keyboard and by touch (docs/ux-standards.md §3.1).
+    // title is unreachable by keyboard and by touch.
     explanation ? el("p", { className: "verdict-note" }, explanation) : null,
     resolving ? resolvingMeter() : null,
     totals?.serverFiles > 0
@@ -604,40 +810,13 @@ function installedLocations(result) {
   );
 }
 
-/**
- * The limits of the check just above, stated where the check is read.
- *
- * These are not general trivia about the server: each one is a reason the verdict may be weaker
- * than it looks, so they sit inside the verdict section rather than under a heading of their own.
- * A missing checksum in particular means "compatible" was decided on names alone, and saying so
- * is what keeps that word honest.
- */
-/**
- * The two things about this server that qualify what Reveille checked.
- *
- * Each is drawn only where it changes something (docs/ui.md §9).
- *
- * **Sends no files** is about maps that are missing, so it is silent when none are: telling a
- * player that a server they can already join will not send them anything is a sentence about a
- * situation they are not in.
- *
- * **No map checksum** is drawn always, including on a server with nothing to fetch, because it
- * qualifies the reading itself. Every "on disk" in this pane was decided by name alone, and that
- * is the one caveat a ready server does not get to keep quiet about.
- */
+/** Drawn only while something is missing, which is the one case where it changes the join. */
 function caveats(server, ready) {
-  const notes = [];
-  if (server.allow_download === 0 && !ready) {
-    notes.push("Sends no files — anything missing has to be here before you join.");
-  }
-  if (server.map_checksum === null || server.map_checksum === undefined) {
-    notes.push("Publishes no map checksum, so only names are matched, not files.");
-  }
-  if (!notes.length) return null;
+  if (ready || server.allow_download !== 0) return null;
   return el(
-    "div",
-    { className: "stack--tight" },
-    notes.map((note) => el("p", { className: "quiet" }, note)),
+    "p",
+    { className: "quiet" },
+    "This server sends no files, so anything missing must be installed before you join.",
   );
 }
 

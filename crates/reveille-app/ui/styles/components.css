@@ -195,6 +195,8 @@
   background: var(--void);
 }
 
+/* Label and count share a baseline: they are set in different faces and sizes, so centring their
+   boxes leaves the smaller count sitting low. */
 .scope__option {
   display: inline-flex;
   align-items: baseline;
@@ -217,6 +219,15 @@
   color: var(--ink);
 }
 
+.scope__icon {
+  align-self: center;
+  color: var(--faint);
+}
+
+.scope__option[aria-pressed="true"] .scope__icon {
+  color: var(--brass);
+}
+
 .scope__count {
   font-size: var(--text-xs);
   color: var(--faint);
@@ -226,70 +237,49 @@
   display: none;
 }
 
-/* The star ------------------------------------------------------------------
-   A control, not a status: brass when set, decoration grey when not. It never
-   colours anything the player reads to make a decision. */
+/* Marks: the favorite star and the watch bell ---------------------------------
+   Controls, not statuses: brass when set, decoration grey when not. */
 
-.star {
+.mark {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border: 0;
   border-radius: var(--radius);
   background: transparent;
   color: var(--faint-deco);
-  font-size: 18px;
+  font-size: 15px;
   line-height: 1;
 }
 
-.star:hover {
+.mark:hover {
   color: var(--brass);
 }
 
-.star[aria-pressed="true"] {
+.mark[aria-pressed="true"] {
   color: var(--brass);
 }
 
-.star--lg {
-  width: 32px;
-  height: 32px;
-  font-size: 22px;
+.marks {
+  display: flex;
+  gap: 2px;
+}
+
+/* In the list an unset mark only shows where the pointer or the selection is, so a hundred rows
+   are not a column of hollow icons. */
+.servers .mark[aria-pressed="false"] {
+  opacity: 0;
+}
+
+.servers tr:hover .mark,
+.servers tr[aria-selected="true"] .mark,
+.servers .mark:focus-visible {
+  opacity: 1;
 }
 
 /* Chips -------------------------------------------------------------------- */
-
-.player-alert-list {
-  display: grid;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-
-.player-alert-entry {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-2);
-  border: 1px solid var(--line);
-}
-
-.player-alert-entry p {
-  margin: 3px 0 0;
-}
-
-.arrival-entry {
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  color: var(--ink);
-  cursor: pointer;
-}
-
-.arrival-entry:hover,
-.arrival-entry:focus-visible {
-  border-color: var(--brass);
-}
 
 .arrival-unread {
   display: inline-block;
@@ -528,6 +518,64 @@ dialog::backdrop {
   line-height: 1.5;
 }
 
+/* Settings ------------------------------------------------------------------ */
+
+.settings__section {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.settings__section:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.settings__section p {
+  margin: 0;
+}
+
+.settings__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings__toggle input {
+  accent-color: var(--brass);
+}
+
+.settings__choice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings__choice select {
+  padding: 4px 24px 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--rise);
+}
+
+.settings__toggle:has(input:disabled),
+.settings__choice:has(select:disabled) {
+  color: var(--faint);
+}
+
+.settings__hint {
+  font-size: var(--text-sm);
+  color: var(--faint);
+}
+
+.settings__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
 /* Context menu --------------------------------------------------------------
    Positioned by lib/menu.js, which keeps it inside the viewport. Chrome, so it
    carries the brass on the focused row; nothing in it is data. */
@@ -568,8 +616,191 @@ dialog::backdrop {
   color: var(--faint-deco);
 }
 
+.menu__item[aria-checked="true"] .menu__label::before {
+  content: "✓";
+  margin-right: 6px;
+  color: var(--brass);
+}
+
+.menu__item[aria-checked="false"] .menu__label::before {
+  content: "✓";
+  margin-right: 6px;
+  visibility: hidden;
+}
+
+.menu__separator {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--line);
+}
+
+.menu__note {
+  max-width: 44ch;
+  padding: 5px 10px 3px;
+  font-family: var(--face-data);
+  font-size: var(--text-xs);
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+/* Popover -------------------------------------------------------------------
+   Placed by lib/popover.js under the control that opened it. */
+
+.popover {
+  position: fixed;
+  z-index: 40;
+  width: 340px;
+  max-height: min(460px, calc(100vh - 60px));
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--lift);
+}
+
+.popover__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.popover__title {
+  margin: 0;
+  font-family: var(--face-display);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.popover__empty {
+  margin: 0;
+  padding: var(--space-3);
+  color: var(--dim);
+  font-size: var(--text-sm);
+}
+
+.popover__foot {
+  display: flex;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+.arrival {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px var(--space-2);
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.arrival:last-child {
+  border-bottom: 0;
+}
+
+.arrival--unread {
+  box-shadow: inset 3px 0 0 var(--brass);
+}
+
+.arrival__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+
+.arrival__meta {
+  grid-column: 1;
+  font-size: var(--text-xs);
+  color: var(--faint);
+}
+
+.arrival__actions {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: flex;
+  gap: var(--space-1);
+}
+
 .menu__hint {
   font-family: var(--face-data);
   font-size: var(--text-xs);
   color: var(--faint);
+}
+
+/* Icons ------------------------------------------------------------------- */
+
+.icon {
+  display: inline-block;
+  flex: none;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+}
+
+/* Shortcut sheet ----------------------------------------------------------- */
+
+dialog:has(.shortcuts-grid) {
+  width: min(760px, 94vw);
+  max-width: none;
+}
+
+/* Two columns so the whole sheet fits a 760px-high window without scrolling. */
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-5) var(--space-6);
+}
+
+.shortcuts__heading {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.shortcuts__list {
+  display: grid;
+  /* One key column for every section, so the actions line up down the sheet. */
+  grid-template-columns: 7.5em 1fr;
+  gap: 6px var(--space-4);
+  margin: 0;
+}
+
+.shortcuts__list dt {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.shortcuts__list dd {
+  margin: 0;
+  color: var(--dim);
+}
+
+.kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius);
+  background: var(--rise);
+  font-family: var(--face-data);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  text-align: center;
+  color: var(--ink);
 }

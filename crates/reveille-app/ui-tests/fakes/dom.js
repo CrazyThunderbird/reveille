@@ -7,7 +7,7 @@
 // immediately become a supply-chain question for issue #10 — a large answer to a small problem.
 // `dom.js` is 88 lines and touches a countable set of DOM features, listed below.
 //
-// **What this models.** `createElement`, `createDocumentFragment`, `activeElement`, `Node`,
+// **What this models.** `createElement`, `createElementNS`, `createDocumentFragment`, `activeElement`, `Node`,
 // `CSS.escape`, and per element: `append`, `replaceChildren`, `setAttribute`, `addEventListener`,
 // `dataset`, `classList`, `querySelector`, `contains`, `focus`, `setSelectionRange`, `textContent`, and the
 // reflected properties `el()` distinguishes by `key in node`.
@@ -16,7 +16,7 @@
 // event dispatch and bubbling, real focus semantics, and — importantly — the ARIA and tabindex
 // reflection that `views/servers.js`'s one-tab-stop behaviour depends on. A fake that approximated
 // those would hand back confidence it had not earned, so those behaviours stay guarded by the
-// source-text tests in `main.rs` (see `docs/rules.md`, "Known gaps").
+// source-text tests in `main.rs`.
 //
 // The `key in node` branch in `el()` is the subtle one: `className` must be a property and
 // `aria-label` must not, or the builder would put the wrong things in the wrong place. REFLECTED
@@ -218,6 +218,10 @@ export function installDom() {
   const document = {
     activeElement: null,
     createElement(tag) {
+      return new FakeElement(tag, document);
+    },
+    // SVG icons: the namespace makes no difference to anything these tests read.
+    createElementNS(_namespace, tag) {
       return new FakeElement(tag, document);
     },
     createDocumentFragment() {

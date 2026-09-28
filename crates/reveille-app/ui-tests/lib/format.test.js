@@ -74,6 +74,34 @@ test("zero bots are null so nothing draws a +0", () => {
   assert.equal(counts.bots, null);
 });
 
+test("the occupancy bar puts players before bots and never overruns capacity", () => {
+  const fill = format.occupancyFill({ clients: 1, bots: 30, capacity: 24 });
+  assert.equal(fill.players, 1 / 24);
+  assert.equal(fill.bots, 23 / 24);
+  assert.equal(fill.activity, "players");
+  assert.equal(fill.full, false);
+});
+
+test("a server is full on players alone and nearly full from 85 percent", () => {
+  assert.equal(format.occupancyFill({ clients: 32, bots: null, capacity: 32 }).full, true);
+  assert.equal(format.occupancyFill({ clients: 28, bots: null, capacity: 32 }).nearlyFull, true);
+  assert.equal(format.occupancyFill({ clients: 27, bots: null, capacity: 32 }).nearlyFull, false);
+  assert.equal(format.occupancyFill({ clients: 32, bots: null, capacity: 32 }).nearlyFull, false);
+});
+
+test("a row's activity separates people, bots only and nobody", () => {
+  assert.equal(format.occupancyFill({ clients: 0, bots: 8, capacity: 16 }).activity, "bots");
+  assert.equal(format.occupancyFill({ clients: 0, bots: null, capacity: 16 }).activity, "empty");
+  assert.equal(format.occupancyFill({ clients: null, bots: null, capacity: null }).activity, "empty");
+});
+
+test("the occupancy text names players and bots separately", () => {
+  assert.equal(format.occupancyText({ clients: 12, bots: 8, capacity: 32 }), "12 players of 32, plus 8 bots");
+  assert.equal(format.occupancyText({ clients: 1, bots: null, capacity: 16 }), "1 player of 16");
+  assert.equal(format.occupancyText({ clients: 32, bots: null, capacity: 32 }), "32 players of 32, full");
+  assert.equal(format.occupancyText({ clients: null, bots: null, capacity: 16 }), "Player count not published");
+});
+
 test("occupancy returns nulls rather than guessing zero", () => {
   assert.deepEqual(format.occupancy({}), { clients: null, bots: null, capacity: null });
 });
@@ -87,6 +115,13 @@ test("the round trip is never described as the in-game ping", () => {
   // the honest one. It is one UDP sample taken while fifteen other probes were in flight.
   assert.match(trip.title, /Not the in-game ping/u);
   assert.match(trip.title, /measured once during this check/u);
+});
+
+test("a ping is banded good below 80 ms, fair up to 150 and poor above", () => {
+  assert.equal(format.roundTrip({ status_round_trip: 79 }).band, "good");
+  assert.equal(format.roundTrip({ status_round_trip: 80 }).band, "fair");
+  assert.equal(format.roundTrip({ status_round_trip: 150 }).band, "fair");
+  assert.equal(format.roundTrip({ status_round_trip: 151 }).band, "poor");
 });
 
 test("an unmeasured round trip is an em dash with no explanation to give", () => {
@@ -133,7 +168,7 @@ test("with no version published, the protocol number is the fallback", () => {
 /* Map names — the engine's normalisation, reproduced exactly ---------------- */
 
 test("mapKey reproduces the engine normalisation and nothing else", () => {
-  // MapKey::new in crates/reveille-core/src/mapindex.rs, and docs/engine-facts.md §2: trim,
+  // MapKey::new in crates/reveille-core/src/mapindex.rs: trim,
   // backslashes to slashes, ASCII lowercase, strip a leading `maps/` and a trailing `.bsp`.
   assert.equal(format.mapKey("  MAPS\\DM\\MOHDM1.BSP  "), "dm/mohdm1");
   assert.equal(format.mapKey("dm/mohdm1"), "dm/mohdm1");
@@ -289,14 +324,11 @@ test("timeAgo invents nothing for a missing or unreadable timestamp", () => {
   assert.equal(format.timeAgo("not a date"), null);
 });
 
-/* The launch line (rule H12) ------------------------------------------------ */
+/* The history line ---------------------------------------------------------- */
 
-test("history says Launched, never joined or played", () => {
+test("the history line says when the server was played", () => {
   const label = format.launchedLabel({ launches: 1, lastLaunchedAt: new Date().toISOString() });
-  // Reveille starts the game process and sees that it started. Whether the server admitted the
-  // player is decided at connect time and Reveille never observes the answer.
-  assert.match(label, /^Launched /u);
-  assert.doesNotMatch(label, /join|played/iu);
+  assert.match(label, /^Played /u);
 });
 
 test("a repeat launch is counted, and a server never launched has no line", () => {
@@ -307,5 +339,48 @@ test("a repeat launch is counted, and a server never launched has no line", () =
 });
 
 test("a launch with no usable timestamp still says how many, not when", () => {
-  assert.equal(format.launchedLabel({ launches: 2, lastLaunchedAt: null }), "Launched 2×");
+  assert.equal(format.launchedLabel({ launches: 2, lastLaunchedAt: null }), "Played 2×");
+});
+
+test("the map cell says nothing for a ready server and counts the maps otherwise", () => {
+  assert.equal(format.mapNeed({ state: "compatible" }), null);
+  assert.deepEqual(
+    { ...format.mapNeed({ state: "needs_maps", count: 3 }), title: undefined },
+    { kind: "download", text: "3", title: undefined },
+  );
+  assert.equal(format.mapNeed({ state: "no_source", count: 1 }).kind, "missing");
+  assert.equal(format.mapNeed({ state: "cant_tell" }).text, "?");
+});
+
+test("the Played column says how long ago, and how often once it is more than once", () => {
+  const ago = new Date(Date.now() - 2 * 3_600_000).toISOString();
+  assert.equal(format.playedLabel({ launches: 1, lastLaunchedAt: ago }), "2h ago");
+  assert.equal(format.playedLabel({ launches: 3, lastLaunchedAt: ago }), "2h ago ×3");
+  assert.equal(format.playedLabel({ launches: 0 }), null);
+});
+
+test("the watch line says what the monitor last saw and when it last alerted", () => {
+  const now = Date.now();
+  assert.equal(format.watchLine(null, null), "Not checked yet");
+  assert.equal(format.watchLine({ count: 3, checkedAt: now }, null), "3 players just now");
+  assert.equal(format.watchLine({ count: 0, checkedAt: now }, null), "No players just now");
+  assert.equal(format.watchLine({ count: null, checkedAt: now - 5 * 60_000 }, null), "No answer 5 min ago");
+  assert.equal(
+    format.watchLine({ count: 1, checkedAt: now }, now - 2 * 3_600_000),
+    "1 player just now · alerted 2h ago",
+  );
+});
+
+test("a toast's second line names the round players arrived for", () => {
+  assert.equal(
+    format.alertDetail({ clients: 4, map: "dm/mohdm6", mode: "Team-Match", round_trip: 21 }),
+    "dm/mohdm6 · Team-Match · 21 ms",
+  );
+  assert.equal(format.alertDetail({ clients: 4, map: null, mode: null, round_trip: 30 }), "30 ms");
+  assert.equal(format.alertDetail(null), null);
+});
+
+test("the watch line states a threshold above one", () => {
+  assert.equal(format.watchLine({ count: 2, checkedAt: Date.now() }, null, 4), "2 players just now · notify at 4+");
+  assert.equal(format.watchLine(null, null, 1), "Not checked yet");
 });

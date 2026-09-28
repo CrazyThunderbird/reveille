@@ -25,11 +25,21 @@ export function unreadArrivalCount() {
   return arrivalEvents().filter((entry) => !entry.read).length;
 }
 
+/** `game|address` -> when players last arrived there, read once for a whole list. */
+export function lastArrivals() {
+  const latest = new Map();
+  for (const entry of arrivalEvents()) {
+    const id = `${entry.game}|${entry.address}`;
+    if ((latest.get(id) ?? -Infinity) < entry.at) latest.set(id, entry.at);
+  }
+  return latest;
+}
+
 export function arrivalById(id) {
   return recent.get(id) ?? arrivalEvents().find((entry) => entry.id === id) ?? null;
 }
 
-export function recordArrival(server, count, at = Date.now()) {
+export function recordArrival(server, count, at = Date.now(), detail = null) {
   const event = {
     id: crypto.randomUUID(),
     game: server.game,
@@ -37,6 +47,8 @@ export function recordArrival(server, count, at = Date.now()) {
     queryPort: server.queryPort,
     hostname: server.hostname,
     count,
+    // The round they arrived for: map, mode and ping, already worded.
+    detail: typeof detail === "string" && detail ? detail : null,
     at,
     read: false,
   };
@@ -56,5 +68,14 @@ export function markArrivalsRead() {
     localStorage.setItem(KEY, JSON.stringify(arrivalEvents().map((entry) => ({ ...entry, read: true }))));
   } catch {
     // The feed remains readable when preferences cannot be saved.
+  }
+}
+
+/** Empty the bell. A toast still on screen stays clickable for this run. */
+export function clearArrivals() {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    // Nothing was saved to clear.
   }
 }

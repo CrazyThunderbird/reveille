@@ -6,6 +6,8 @@
 // Bots are reported separately. A connection may still be downloading or idle,
 // and capacity minus players does not reliably give the number of free slots.
 
+import { preferences } from "./preferences.js";
+
 /** Bytes as a short human size. Sub-MB values keep a decimal so 0.4 MB is not "0 MB". */
 export function bytes(value) {
   if (value === null || value === undefined) return "—";
@@ -39,6 +41,42 @@ export function occupancy(server) {
   };
 }
 
+/** Share of capacity above which a server reads as nearly full. */
+export const NEARLY_FULL = 0.85;
+
+/**
+ * How full a server is, for the occupancy bar and the row's activity styling.
+ *
+ * Players and bots are separate segments of one track, players first, clipped so the two never
+ * overrun capacity. `activity` is what the row looks like at a glance: people on it, only bots,
+ * or nobody.
+ */
+export function occupancyFill({ clients, bots, capacity }) {
+  const players = clients ?? 0;
+  const botCount = bots ?? 0;
+  const activity = players > 0 ? "players" : botCount > 0 ? "bots" : "empty";
+  if (!capacity || capacity < 1) {
+    return { players: 0, bots: 0, full: false, nearlyFull: false, activity };
+  }
+  const playerShare = Math.min(1, players / capacity);
+  const botShare = Math.min(1 - playerShare, botCount / capacity);
+  return {
+    players: playerShare,
+    bots: botShare,
+    full: players >= capacity,
+    nearlyFull: players < capacity && playerShare >= NEARLY_FULL,
+    activity,
+  };
+}
+
+/** The occupancy cell's tooltip and accessible name, in words. */
+export function occupancyText({ clients, bots, capacity }) {
+  if (clients === null) return "Player count not published";
+  const players = `${plural(clients, "player")}${capacity ? ` of ${capacity}` : ""}`;
+  const full = capacity && clients >= capacity ? ", full" : "";
+  return bots ? `${players}${full}, plus ${plural(bots, "bot")}` : `${players}${full}`;
+}
+
 /**
  * The Ping column: the round trip of this sweep's one status request.
  *
@@ -50,13 +88,16 @@ export function occupancy(server) {
  * The server's own `sv_minPing`/`sv_maxPing` gate is a different number and is
  * never rendered here.
  */
+/** The dot beside a ping: green below one bound, amber up to the other, both set in Settings. */
 export function roundTrip(server) {
   const value = server.status_round_trip;
   if (value === null || value === undefined) return { text: "—", title: null };
   const millis = Number(value);
   if (!Number.isFinite(millis)) return { text: "—", title: null };
+  const { pingGood, pingFair } = preferences();
   return {
     text: `${millis} ms`,
+    band: millis < pingGood ? "good" : millis <= pingFair ? "fair" : "poor",
     title:
       "Time for one status request to this server and back, measured once during this check. Not the in-game ping.",
   };
@@ -103,7 +144,7 @@ function fallbackVersion(server) {
 /**
  * The engine's map-name normalisation, reproduced exactly.
  *
- * `MapKey::new` in crates/reveille-core/src/mapindex.rs, and docs/engine-facts.md §2:
+ * `MapKey::new` in crates/reveille-core/src/mapindex.rs:
  * trim, backslashes to slashes, ASCII lowercase, strip a leading `maps/` and a
  * trailing `.bsp`, and **nothing else**. Both prefixed and bare names are
  * legitimate, so no prefix may be inserted.
@@ -128,12 +169,40 @@ export function mapName(value) {
 }
 
 /**
+ * What the Map cell adds after the map name: how many maps this server needs, so "can I join
+ * right now?" is answered on every row without selecting it. Nothing for a ready server.
+ */
+export function mapNeed(state) {
+  switch (state?.state) {
+    case "compatible":
+      return null;
+    case "needs_maps":
+      return {
+        kind: "download",
+        text: String(state.count),
+        title: `Needs ${plural(state.count, "map")}. Reveille downloads them when you join.`,
+      };
+    case "no_source":
+      return {
+        kind: "missing",
+        text: String(state.count),
+        title: `No download found for ${plural(state.count, "map")}.`,
+      };
+    default:
+      return {
+        kind: "unknown",
+        text: "?",
+        title: "This server publishes no map list, so Reveille can only check the map running now.",
+      };
+  }
+}
+
+/**
  * The canonical four state names.
  *
  * Every one of them is a measurement, not a mood word. A verbal hedge — "can't tell", "no
  * source", "possibly compatible" — costs a reader trust in the figure and in the source, where
- * the same fact stated as a measurement costs almost none (van der Bles et al., PNAS 2020;
- * docs/ux-standards.md §1.1). So the name says what Reveille found, and the player is left to
+ * the same fact stated as a measurement costs almost none (van der Bles et al., PNAS 2020). So the name says what Reveille found, and the player is left to
  * draw the verdict.
  *
  * "Map list", never "rotation" — the server publishes a list, and calling it a rotation claims an
@@ -156,11 +225,10 @@ export function stateName(state) {
  * How each state was arrived at, rendered as persistent text beside the name.
  *
  * Not a tooltip. This is the sentence that turns a two-word noun into a decision, and a `title`
- * is unreachable by keyboard and by touch and fails WCAG 2.2 SC 1.4.13 outright
- * (docs/ux-standards.md §3.1).
+ * is unreachable by keyboard and by touch and fails WCAG 2.2 SC 1.4.13 outright.
  *
  * `Compatible` returns null on purpose. A ready server says nothing: silence is the correct
- * rendering of "nothing to do" (docs/ui.md §9).
+ * rendering of "nothing to do".
  */
 export function stateExplanation(state) {
   switch (state?.state) {
@@ -219,18 +287,54 @@ export function timeAgo(iso) {
   return then.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
-/**
- * The launch line: what Reveille did, not what the server did.
- *
- * "Launched", never "joined" or "played". Reveille starts the game process and sees that it
- * started. Whether the server admitted the player is decided at connect time and Reveille never
- * observes the answer (docs/rules.md H12).
- */
+/** The detail pane's history line: when this server was last played from Reveille, and how often. */
 export function launchedLabel(entry) {
   if (!entry?.launches) return null;
   const when = timeAgo(entry.lastLaunchedAt);
   const times = entry.launches > 1 ? ` · ${entry.launches}×` : "";
-  return when ? `Launched ${when}${times}` : `Launched ${entry.launches}×`;
+  return when ? `Played ${when}${times}` : `Played ${entry.launches}×`;
+}
+
+/** The History view's Played column: how long ago, and how often once it is more than once. */
+export function playedLabel(entry) {
+  if (!entry?.launches) return null;
+  const when = timeAgo(entry.lastLaunchedAt);
+  const times = entry.launches > 1 ? ` ×${entry.launches}` : "";
+  return when ? `${when}${times}` : `×${entry.launches}`;
+}
+
+/** A toast's second line: the round players arrived for, from what the monitor read. */
+export function alertDetail(reading) {
+  if (!reading) return null;
+  const parts = [
+    reading.map ? mapName(reading.map) : null,
+    reading.mode ? gameType({ game_type: reading.mode }).text : null,
+    Number.isInteger(reading.round_trip) ? `${reading.round_trip} ms` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+/**
+ * What the watch monitor last saw on one server, for the Watching view. `lastAlertAt` comes from
+ * the stored arrivals rather than the monitor, so it survives a restart.
+ */
+export function watchLine(reading, lastAlertAt, threshold = 1) {
+  const parts = [];
+  if (!reading) parts.push("Not checked yet");
+  else {
+    const checked = timeAgo(reading.checkedAt);
+    const seen =
+      reading.count === null || reading.count === undefined
+        ? "No answer"
+        : reading.count === 0
+          ? "No players"
+          : plural(reading.count, "player");
+    parts.push(checked ? `${seen} ${checked}` : seen);
+  }
+  const alerted = timeAgo(lastAlertAt);
+  if (alerted) parts.push(`alerted ${alerted}`);
+  if (threshold > 1) parts.push(`notify at ${threshold}+`);
+  return parts.join(" · ");
 }
 
 /**
@@ -238,7 +342,7 @@ export function launchedLabel(entry) {
  *
  * The sweep emits one event per probed endpoint, so a region restating "N of M done" fired
  * roughly two hundred announcements per sweep — not progress reporting but a denial of service
- * against the one output a blind player has (docs/ux-standards.md §5.7). Progress is announced at
+ * against the one output a blind player has. Progress is announced at
  * quarters instead: start, three milestones, then the summary. Five utterances rather than two
  * hundred.
  *
@@ -281,7 +385,7 @@ export function nonResultReason(group) {
  * The `kind` is decided in Rust, beside the errors it names, exactly as `OpenMohaaFailureKind`
  * already is — the shell never reads a cause out of a formatted message. Each one carries a cause
  * and a remedy, because the two moments this fires are where a non-technical player decides
- * whether the tool is broken or their PC is (docs/design-review.md F6).
+ * whether the tool is broken or their PC is.
  *
  * The original message is kept as `detail` and shown as detail, not as the whole status bar.
  */

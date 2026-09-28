@@ -6,7 +6,9 @@
 
 import { $, el } from "./lib/dom.js";
 import { closeDialog, openDialog } from "./lib/dialog.js";
-import { closeMenu, menuIsOpen } from "./lib/menu.js";
+import { closeMenu, menuIsOpen, openMenu } from "./lib/menu.js";
+import { icon } from "./lib/icons.js";
+import { closePopover, openPopover, popoverAnchor } from "./lib/popover.js";
 import {
   appLogFiles,
   browseFailure,
@@ -14,11 +16,13 @@ import {
   cancelBrowse,
   cancelReveilleUpdate,
   canNotify,
+  appVersion,
   checkReveilleUpdate,
   checkServer,
   clearPlayerAlertAttention,
   errorText,
   focusReveille,
+  gameClientRunning,
   installAndLaunch,
   installServerFiles,
   installReveilleUpdate,
@@ -30,13 +34,14 @@ import {
   notificationPermission,
   openExternalUrl,
   previewJoin,
-  probePlayerCount,
+  readWatchedServer,
   requestPlayerAlertAttention,
   sendPlayerNotification,
 } from "./lib/api.js";
 import {
   arrivalById,
   arrivalEvents,
+  clearArrivals,
   markArrivalsRead,
   recordArrival,
   unreadArrivalCount,
@@ -44,25 +49,29 @@ import {
 import { favorites, recordLaunch, toggleFavorite } from "./lib/bookmarks.js";
 import {
   addPlayerAlert,
+  alertId,
   hasPlayerAlert,
-  playerAlerts,
   removePlayerAlert,
   startPlayerAlertMonitor,
 } from "./lib/player-alerts.js";
-import { clockTime, displayPath } from "./lib/format.js";
+import { alertDetail, clockTime, displayPath, plural, timeAgo } from "./lib/format.js";
 import {
   GAME_LABELS,
+  SCOPES,
   applyCheckNonResult,
   applyCheckedRow,
   canRecheck,
+  countsByAddress,
   droppedIdentity,
   listIsForCurrentSession,
+  listIsStale,
   loadFilters,
   notify,
   playableGames,
   recallInstall,
   rememberGame,
   rememberReadyJoin,
+  saveFilters,
   selectedRow,
   session,
   state,
@@ -70,6 +79,9 @@ import {
   update,
 } from "./lib/store.js";
 import { autoDetect, setupView } from "./views/setup.js";
+import { openSettings } from "./views/settings.js";
+import { openShortcuts } from "./views/shortcuts.js";
+import { preferences } from "./lib/preferences.js";
 import { nonResultsBreakdown, serversView } from "./views/servers.js";
 import { joinView, shoppingTotals } from "./views/join.js";
 
@@ -84,9 +96,12 @@ const servers = serversView({
   onRefresh: refresh,
   onCancel: stopBrowse,
   onSelect: select,
+  onActivate: activate,
   onShowNonResults: showNonResults,
   onCheck: check,
   onGame: selectGame,
+  onToggleWatch: togglePlayerAlert,
+  onToggleDetail: toggleDetail,
 });
 const join = joinView($("#detail-slot"), {
   onInstallServerFiles: getServerFiles,
@@ -105,11 +120,14 @@ $("#list-slot").replaceWith(servers.listPane);
 $("#status-slot").replaceWith(servers.statusbar);
 document.body.append(servers.live);
 
-$("#install-chip").addEventListener("click", leaveServers);
+$("#arrival-events-btn").prepend(icon("bell"));
+$("#settings-btn").append(icon("gear"));
+$("#more-btn").append(icon("dots"));
+$("#game-switch").addEventListener("click", openGameMenu);
 $("#reveille-update-btn").addEventListener("click", openReveilleUpdate);
-$("#bug-report-btn").addEventListener("click", () => void openBugReport());
-$("#arrival-events-btn").addEventListener("click", openArrivalFeed);
-$("#player-alerts-btn").addEventListener("click", openPlayerAlerts);
+$("#arrival-events-btn").addEventListener("click", toggleArrivals);
+$("#settings-btn").addEventListener("click", () => void openAppSettings());
+$("#more-btn").addEventListener("click", openMoreMenu);
 $("#info-dialog-close").addEventListener("click", closeDialog);
 $("#reveille-update-later").addEventListener("click", dismissReveilleUpdate);
 $("#reveille-update-install").addEventListener("click", startReveilleUpdate);
@@ -121,36 +139,52 @@ void onSelfUpdateProgress(receiveReveilleUpdateProgress);
 
 subscribe(render);
 
-let alertDeliveryError = null;
 let pendingArrival = null;
 let openingArrival = false;
 let attentionRequested = false;
 window.addEventListener("focus", () => {
   attentionRequested = false;
   void clearPlayerAlertAttention().catch(() => {});
+  refreshOnReturn();
 });
 void onPlayerNotificationClick(({ eventId }) => {
   const event = arrivalById(eventId);
   if (event) requestOpenArrival(event);
 });
-const alertMonitor = startPlayerAlertMonitor(probePlayerCount, async (entry, count) => {
-  const event = recordArrival(entry, count);
+const alertMonitor = startPlayerAlertMonitor(
+  readWatchedServer,
+  deliverArrival,
+  (id, reading) => update((next) => next.watchReadings.set(id, reading)),
+  () => preferences().cooldownMinutes * 60_000,
+);
+
+async function deliverArrival(entry, count, reading) {
+  if (!preferences().alertsEnabled) return;
+  const event = recordArrival(entry, count, Date.now(), alertDetail(reading));
   renderArrivalBadge();
+  // Kept under the bell, but no toast and no flashing taskbar over a game in progress.
+  if (preferences().quietWhilePlaying && (await gameClientRunning().catch(() => null)) === true) return;
   if (!document.hasFocus() && !attentionRequested) {
     attentionRequested = true;
     void requestPlayerAlertAttention().catch(() => { attentionRequested = false; });
   }
   if (!(await canNotify())) {
-    alertDeliveryError = "Notifications are disabled for Reveille in your system settings.";
+    update((next) => (next.alertError = "Notifications are disabled for Reveille in your system settings."));
     return;
   }
   try {
     if (event) await sendPlayerNotification(event);
-    alertDeliveryError = null;
+    if (state.alertError) update((next) => (next.alertError = null));
   } catch {
-    alertDeliveryError = "Reveille could not show a system notification.";
+    update((next) => (next.alertError = "Reveille could not show a system notification."));
   }
-});
+}
+
+function forgetWatch(game, address) {
+  removePlayerAlert(game, address);
+  alertMonitor.forget(game, address);
+  update((next) => next.watchReadings.delete(alertId({ game, address })));
+}
 
 function renderArrivalBadge() {
   const count = unreadArrivalCount();
@@ -158,33 +192,81 @@ function renderArrivalBadge() {
   badge.classList.toggle("hidden", count === 0);
   badge.textContent = count > 0 ? String(count) : "";
   $("#arrival-events-btn").setAttribute("aria-label",
-    count ? `Alerts, ${count} unread` : "Alerts");
+    count ? `Player alerts, ${count} unread` : "Player alerts");
 }
 
-function openArrivalFeed() {
-  const events = arrivalEvents();
+/**
+ * The bell's popover: the latest arrivals, newest first, each with Show and Join. Opening it marks
+ * them read, but the ones that were unread keep their edge until it closes.
+ */
+function toggleArrivals() {
+  const anchor = $("#arrival-events-btn");
+  if (popoverAnchor() === anchor) {
+    closePopover();
+    return;
+  }
+  const events = arrivalEvents().slice(0, 12);
   markArrivalsRead();
   renderArrivalBadge();
-  openDialog("Alerts",
+  openPopover(anchor, "Player alerts",
+    el("div", { className: "popover__head" },
+      el("h2", { className: "popover__title" }, "Player alerts"),
+      state.alertError && el("span", { className: "error", role: "alert" }, state.alertError),
+    ),
     events.length === 0
-      ? el("p", null, "No player arrivals yet.")
-      : el("div", { className: "player-alert-list" }, events.map((event) =>
-          el("button", {
-            type: "button",
-            className: "player-alert-entry arrival-entry",
-            onclick: () => requestOpenArrival(event),
-          },
-          el("strong", null, `${event.count} ${event.count === 1 ? "player" : "players"} on ${event.hostname}`),
-          el("p", { className: "quiet data" },
-            `${GAME_LABELS[event.game]} · ${event.address} · ${new Date(event.at).toLocaleString()}`),
-          ),
-        )),
+      ? el("p", { className: "popover__empty" },
+          "No alerts yet. Turn on a server's bell and Reveille tells you here when players join it.")
+      : el("div", null, events.map(arrivalEntry)),
+    el("div", { className: "popover__foot" },
+      el("button", {
+        type: "button",
+        className: "btn btn--sm btn--utility",
+        onclick: () => {
+          closePopover();
+          servers.selectScope("watching");
+        },
+      }, "Open Watching"),
+      events.length > 0 && el("button", {
+        type: "button",
+        className: "btn btn--sm btn--utility",
+        onclick: () => {
+          clearArrivals();
+          renderArrivalBadge();
+          update(() => {});
+          closePopover();
+          toggleArrivals();
+        },
+      }, "Clear all"),
+    ),
   );
 }
 
-function requestOpenArrival(event) {
-  pendingArrival = event;
+function arrivalEntry(event) {
+  const where = playableGames(state.install).length > 1 ? `${GAME_LABELS[event.game]} · ` : "";
+  return el("div", { className: `arrival${event.read ? "" : " arrival--unread"}` },
+    el("span", { className: "arrival__title", title: event.hostname },
+      el("strong", null, plural(event.count, "player")), ` on ${event.hostname}`),
+    el("span", { className: "arrival__meta" },
+      [where + (timeAgo(new Date(event.at).toISOString()) ?? ""), event.detail].filter(Boolean).join(" · ")),
+    el("span", { className: "arrival__actions" },
+      el("button", {
+        type: "button",
+        className: "btn btn--sm",
+        onclick: () => requestOpenArrival(event),
+      }, "Show"),
+      el("button", {
+        type: "button",
+        className: "btn btn--sm btn--primary",
+        onclick: () => requestOpenArrival(event, { join: true }),
+      }, "Join"),
+    ),
+  );
+}
+
+function requestOpenArrival(event, { join = false } = {}) {
+  pendingArrival = { event, join };
   closeDialog();
+  closePopover();
   void focusReveille().catch(() => {});
   void openPendingArrival();
 }
@@ -192,7 +274,8 @@ function requestOpenArrival(event) {
 async function openPendingArrival() {
   if (openingArrival || !pendingArrival || state.browse.running || state.joining) return;
   openingArrival = true;
-  const event = pendingArrival;
+  const pending = pendingArrival;
+  const { event } = pending;
   pendingArrival = null;
   try {
     if (!state.install || !playableGames(state.install).includes(event.game)) {
@@ -203,7 +286,7 @@ async function openPendingArrival() {
     if (state.game !== event.game) await selectGame(event.game);
     if (state.browse.running) await browseFinished();
     if (state.game !== event.game || state.joining) {
-      pendingArrival = event;
+      pendingArrival = pending;
       return;
     }
     const checked = await check({ address: event.address, queryPort: event.queryPort });
@@ -211,6 +294,9 @@ async function openPendingArrival() {
     if (checked?.address === event.address && state.game === event.game) {
       servers.reveal(event.address);
       select(event.address);
+      // Join goes through the same path as a double-click, so a server that needs downloads
+      // stops on its priced button rather than fetching anything.
+      if (pending.join) activate(event.address);
     } else {
       openDialog("Server unavailable", el("p", null,
         `${event.hostname} (${event.address}) is no longer answering.`));
@@ -219,6 +305,48 @@ async function openPendingArrival() {
     openingArrival = false;
     if (pendingArrival) queueMicrotask(() => void openPendingArrival());
   }
+}
+
+/* Titlebar menus ------------------------------------------------------------ */
+
+/**
+ * The game and engine this session plays, and the way to change either. It replaced the toolbar's
+ * Game select and the folder chip: both answer "what am I browsing for", so they sit together.
+ */
+function openGameMenu(event) {
+  const anchor = $("#game-switch");
+  const games = playableGames(state.install);
+  const busy = state.browse.running || state.joining;
+  openMenu([
+    ...(games.length > 1
+      ? games.map((game) => ({
+          label: GAME_LABELS[game] ?? game,
+          checked: game === state.game,
+          disabled: busy && game !== state.game,
+          onSelect: () => void selectGame(game),
+        }))
+      : []),
+    games.length > 1 && { separator: true },
+    { label: "Change folder or engine…", disabled: state.joining, onSelect: leaveServers },
+    { note: displayPath(state.install.root) },
+  ].filter(Boolean), event, anchor);
+}
+
+function openMoreMenu(event) {
+  openMenu([
+    { label: "Keyboard shortcuts", hint: "?", onSelect: openShortcuts },
+    { label: "Report a bug", onSelect: () => void openBugReport() },
+    { label: "About Reveille", onSelect: () => void openAbout() },
+  ], event, $("#more-btn"));
+}
+
+async function openAbout() {
+  const version = await appVersion().catch(() => null);
+  openDialog("About Reveille",
+    el("p", null, "A server browser and launcher for Medal of Honor: Allied Assault, Spearhead and Breakthrough."),
+    version && el("p", { className: "data" }, `Version ${version}`),
+    el("p", { className: "quiet" }, "Free software under the GNU General Public License, version 3."),
+  );
 }
 
 function browseFinished() {
@@ -235,9 +363,7 @@ function browseFinished() {
 async function togglePlayerAlert(row) {
   const game = state.game;
   if (hasPlayerAlert(game, row.address)) {
-    removePlayerAlert(game, row.address);
-    alertMonitor.forget(game, row.address);
-    update(() => {});
+    forgetWatch(game, row.address);
     return;
   }
   try {
@@ -251,7 +377,7 @@ async function togglePlayerAlert(row) {
       "Reveille could not request notification permission. Check your system settings."));
     return;
   }
-  if (!addPlayerAlert(row, game)) {
+  if (!addPlayerAlert(row, game, preferences().defaultThreshold)) {
     openDialog("Player alerts", el("p", null,
       "Reveille could not save this server's alert. Try again after restarting the app."));
     return;
@@ -260,36 +386,30 @@ async function togglePlayerAlert(row) {
   alertMonitor.checkNow();
 }
 
-function openPlayerAlerts() {
-  const entries = playerAlerts();
-  openDialog("Settings",
-    el("h3", null, "Player alerts"),
-    el("p", { className: "quiet" },
-      "Reveille checks these servers while it is running and tells you when players arrive."),
-    alertDeliveryError && el("p", { className: "error", role: "alert" }, alertDeliveryError),
-    entries.length === 0
-      ? el("p", null, "No player alerts yet. Select a server and turn on its bell to add one.")
-      : el("div", { className: "player-alert-list" }, entries.map((entry) =>
-          el("div", { className: "player-alert-entry" },
-            el("div", null,
-              el("strong", null, entry.hostname),
-              el("p", { className: "quiet data" },
-                `${GAME_LABELS[entry.game] ?? entry.game} · ${entry.address}`),
-            ),
-            el("button", {
-              type: "button",
-              className: "btn btn--sm",
-              "aria-label": `Turn off player alerts for ${entry.hostname}`,
-              onclick: () => {
-                removePlayerAlert(entry.game, entry.address);
-                alertMonitor.forget(entry.game, entry.address);
-                update(() => {});
-                openPlayerAlerts();
-              },
-            }, "Remove"),
-          ),
-        )),
-  );
+async function openAppSettings() {
+  const version = await appVersion().catch(() => null);
+  openSettings({
+    engine: engineLabel(state.engine),
+    version,
+    onChangeInstall: () => {
+      closeDialog();
+      leaveServers();
+    },
+    onOpenWatching: () => {
+      closeDialog();
+      servers.selectScope("watching");
+    },
+    onUpdate: () => {
+      closeDialog();
+      openReveilleUpdate();
+    },
+    onCheckUpdate: async () => {
+      const offer = await checkReveilleUpdate();
+      if (offer) update((next) => (next.selfUpdate.offer = offer));
+      return offer;
+    },
+    onReportBug: () => void openBugReport(),
+  });
 }
 
 function render() {
@@ -302,13 +422,21 @@ function render() {
   setupRoot.classList.toggle("hidden", ready);
   if (!ready) return;
 
-  $("#install-chip-path").textContent = displayPath(state.install.root);
-  $("#install-chip-engine").textContent =
-    `${GAME_LABELS[state.game] ?? state.game} · ${engineLabel(state.engine)}`;
+  $("#game-switch-game").textContent = GAME_LABELS[state.game] ?? state.game;
+  $("#game-switch-engine").textContent = engineLabel(state.engine);
+  $("#game-switch").title = `${displayPath(state.install.root)}\nChange game, engine or folder`;
   $("#reveille-update-btn").classList.toggle("hidden", !state.selfUpdate.offer);
   $("#reveille-update-btn").disabled = state.joining;
+  const collapsed = state.detailCollapsed;
+  $("main.split").classList.toggle("split--wide", collapsed);
+  $("#detail-slot").classList.toggle("hidden", collapsed);
   servers.render();
-  join.render();
+  if (!collapsed) join.render();
+}
+
+function toggleDetail() {
+  update((next) => (next.detailCollapsed = !next.detailCollapsed));
+  saveFilters();
 }
 
 /* Bug reports -------------------------------------------------------------- */
@@ -556,6 +684,20 @@ function selectGame(game) {
 
 /* Browsing ----------------------------------------------------------------- */
 
+/**
+ * Coming back to a list more than five minutes old gets it again, once, keeping the selected
+ * server selected. Not while a join owns the pane or a dialog is open over the list.
+ */
+function refreshOnReturn() {
+  if (!preferences().refreshOnFocus || !state.install || state.browse.running || state.joining) return;
+  if (!state.servers.length || !listIsForCurrentSession() || !listIsStale()) return;
+  if (document.querySelector("dialog[open]")) return;
+  const kept = state.selected;
+  void refresh().then(() => {
+    if (kept && !state.selected && state.servers.some((row) => row.address === kept)) select(kept);
+  });
+}
+
 async function refresh() {
   if (state.browse.running) return;
   // Any check still in flight is about the list this sweep is replacing.
@@ -563,11 +705,14 @@ async function refresh() {
   const swept = session();
   // What is on screen now, kept only so a sweep that fails outright has something honest to fall
   // back to. Blanking the table on a failed sweep left the centre of the window reading "Nothing
-  // has been checked yet" under an error about the check that had just run (docs/design-review.md
-  // F6). Only a list swept for *this* session qualifies: rows from another game or another folder
-  // are not a stale answer to this question, they are an answer to a different one.
+  // has been checked yet" under an error about the check that had just run. Only a list swept for
+  // *this* session qualifies: rows from another game or another folder are not a stale answer to
+  // this question, they are an answer to a different one.
   const previous = listIsForCurrentSession() ? state.servers : [];
+  // A server that was in the last list but not in this one keeps no count to compare against.
+  const previousCounts = countsByAddress(previous);
   const previousAt = state.browse.completedAt;
+  const previousFinishedAt = state.browse.finishedAt;
   update((next) => {
     // Recorded before the first row arrives, because the streamed rows belong to this session
     // too, and a sweep that ends in an error still has to leave behind what it was asking.
@@ -583,8 +728,10 @@ async function refresh() {
       cancelled: false,
       error: null,
       completedAt: null,
+      finishedAt: null,
     };
     next.servers = [];
+    next.previousCounts = previousCounts;
     next.summary = null;
     next.nonResults = [];
     next.selected = null;
@@ -606,6 +753,7 @@ async function refresh() {
       next.browse.running = false;
       next.browse.cancelled = payload.cancelled;
       next.browse.completedAt = clockTime();
+      next.browse.finishedAt = new Date().toISOString();
     });
   } catch (error) {
     update((next) => {
@@ -617,6 +765,7 @@ async function refresh() {
         next.servers = previous;
         next.staleAt = previousAt;
         next.browse.completedAt = previousAt;
+        next.browse.finishedAt = previousFinishedAt;
       }
     });
   }
@@ -653,7 +802,7 @@ let previewTimer = null;
  *
  * Selection follows focus in the grid, which is what makes the arrow keys useful — but it also
  * means holding Down through twenty rows used to fire twenty `preview_join` calls at moh-db, one
- * per row passed over (docs/design-review.md F4). The pane still updates on every step; only the
+ * per row passed over. The pane still updates on every step; only the
  * third-party request waits. Long enough that scrolling costs nothing, short enough that a
  * deliberate selection does not feel delayed.
  */
@@ -688,6 +837,26 @@ function select(address) {
     previewTimer = null;
     void resolvePreview(address, token);
   }, PREVIEW_SETTLE_MS);
+}
+
+/**
+ * A double-click or Enter on a row. A server with nothing to fetch joins at once; anything else
+ * stops on the priced Join button, so no download starts without its size on screen and a second
+ * Enter is the consent.
+ */
+function activate(address) {
+  if (state.selected !== address) select(address);
+  const row = selectedRow();
+  if (!row) return;
+  const ready = row.compatibility.state.state === "compatible";
+  const idle = !state.joining && state.checks.get(address)?.status !== "checking";
+  if (ready && idle) {
+    void getAndJoin(row, false);
+    return;
+  }
+  // The price and the consent live in the pane, so a hidden pane opens for them.
+  if (state.detailCollapsed) toggleDetail();
+  join.focusJoin(address);
 }
 
 async function resolvePreview(address, token) {
@@ -775,7 +944,7 @@ async function getAndJoin(row, acceptIncomplete) {
       acceptIncomplete,
     );
     // Only a launched outcome is remembered. A refusal means Reveille did not start the game,
-    // so there is nothing that happened to record (docs/rules.md H12). The launch is recorded even
+    // so there is nothing that happened to record. The launch is recorded even
     // if the session moved on — it really did happen — but its result is not rendered into a
     // session it is no longer about.
     if (result.outcome?.launch === "launched") recordLaunch(row);
@@ -975,7 +1144,7 @@ function showNonResults() {
  *
  * F6 is the Windows convention for moving between the panes of one window, and without it a
  * keyboard player crossing from the list to the detail pane has to arrow through the list to its
- * end first (docs/design-review.md F22).
+ * end first.
  */
 const REGIONS = [
   { root: () => document.querySelector(".toolbar"), enter: () => servers.focusSearch() },
@@ -1006,7 +1175,7 @@ function cycleRegion(backwards) {
  * WebView2's own context menu never reaches a row, a button or a heading.
  *
  * Back, Reload and Inspect on a right-click is the loudest tell that a desktop window is a web
- * page in a costume (docs/ux-standards.md §7.3). It is left alone over anything the player can
+ * page in a costume. It is left alone over anything the player can
  * select text in, because there the browser menu is genuinely the right one — Copy is what a
  * right-click on an address is for.
  */
@@ -1017,7 +1186,7 @@ document.addEventListener("contextmenu", (event) => {
     target instanceof HTMLInputElement ||
     target instanceof HTMLTextAreaElement ||
     target?.isContentEditable === true ||
-    Boolean(target?.closest?.(".selectable, .data, .server-address"));
+    Boolean(target?.closest?.(".selectable, .data"));
   if (!editable) event.preventDefault();
 });
 
@@ -1033,7 +1202,7 @@ document.addEventListener("keydown", (event) => {
     event.target instanceof HTMLSelectElement ||
     event.target instanceof HTMLTextAreaElement ||
     event.target.isContentEditable === true ||
-    Boolean(event.target.closest?.("dialog[open]"));
+    Boolean(event.target.closest?.("dialog[open], .popover"));
   const plain = !event.ctrlKey && !event.altKey && !event.metaKey;
   const findOrRefreshModifier = (event.ctrlKey || event.metaKey) && !event.altKey;
   if (event.key === "F6") {
@@ -1044,9 +1213,20 @@ document.addEventListener("keydown", (event) => {
     // stays for the players who learned it here.
     event.preventDefault();
     servers.focusSearch();
+  } else if (findOrRefreshModifier && /^[1-4]$/u.test(event.key)) {
+    event.preventDefault();
+    servers.selectScope(SCOPES[Number(event.key) - 1]);
+  } else if (findOrRefreshModifier && (event.key === "d" || event.key === "D")) {
+    event.preventDefault();
+    toggleDetail();
+  } else if (event.key === "?" && !typing && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    openShortcuts();
   } else if (event.key === "/" && !typing) {
     event.preventDefault();
     servers.focusSearch();
+  } else if (event.key === "Escape" && popoverAnchor()) {
+    closePopover({ restoreFocus: true });
   } else if (event.key === "Escape" && menuIsOpen()) {
     closeMenu();
   } else if (event.key === "Escape" && typing) {
@@ -1061,6 +1241,11 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     toggleFavorite(row);
     notify();
+  } else if ((event.key === "w" || event.key === "W") && !typing && plain) {
+    const row = selectedRow();
+    if (!row) return;
+    event.preventDefault();
+    void togglePlayerAlert(row);
   } else if ((event.key === "r" || event.key === "R") && !typing && plain) {
     // Plain R re-asks the selected server; Ctrl+R or Command+R, handled above, re-asks the whole
     // list. The modifier is the difference between one probe and a couple of hundred.

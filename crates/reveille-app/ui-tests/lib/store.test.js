@@ -22,9 +22,11 @@ function row(address, extra = {}) {
       occupancy: { clients_reported: extra.clients ?? 0, bots_reported: extra.bots ?? 0 },
       status_round_trip: "roundTrip" in extra ? extra.roundTrip : 50,
       current_map: extra.map ?? "dm/mohdm1",
-      game_type: extra.mode ?? "Deathmatch",
+      game_type: "mode" in extra ? extra.mode : "Deathmatch",
       endpoint: { query_port: extra.queryPort ?? 12300 },
+      client_capacity: extra.capacity ?? 32,
     },
+    compatibility: { state: { state: extra.needs ? "needs_maps" : "compatible", count: extra.needs } },
   };
 }
 
@@ -36,13 +38,16 @@ function reset(seed = {}) {
   store.state.engine = null;
   store.state.game = "allied_assault";
   store.state.listSession = null;
-  store.state.filters = { query: "", notEmpty: false, maxPing: null };
+  store.state.filters = { query: "", maxPing: null, modes: [], ready: false };
+  store.state.showEmpty = false;
+  store.state.detailCollapsed = false;
   store.state.sort = { column: "clients", direction: "desc" };
   store.state.scope = "all";
   store.state.showAbsent = false;
   store.state.browse = { ...store.state.browse, running: false };
   store.state.joining = false;
   store.state.checks = new Map();
+  store.state.previousCounts = new Map();
   return storage;
 }
 
@@ -163,12 +168,39 @@ test("the search box matches the address as well as the name", () => {
   assert.equal(store.visibleServers().length, 1);
 
   // Pasting an IP used to say "Nothing matches" in All while finding it in Favorites, because the
-  // two code paths matched different fields (docs/design-review.md F13).
+  // two code paths matched different fields.
   store.state.filters.query = "10.0.0.1";
   assert.equal(store.visibleServers().length, 1);
 
   store.state.filters.query = "nothing like it";
   assert.equal(store.visibleServers().length, 0);
+});
+
+test("the search box also matches the map and the mode", () => {
+  reset();
+  store.state.servers = [
+    row("a:1", { map: "obj/obj_team2", mode: "Objective-Match" }),
+    row("b:1", { map: "dm/mohdm6", mode: "Team-Match" }),
+  ];
+
+  store.state.filters.query = "mohdm6";
+  assert.deepEqual(store.visibleServers().map((item) => item.address), ["b:1"]);
+
+  store.state.filters.query = "objective";
+  assert.deepEqual(store.visibleServers().map((item) => item.address), ["a:1"]);
+});
+
+test("equally busy servers sort nearest first", () => {
+  reset();
+  store.state.servers = [
+    row("far:1", { hostname: "A far", clients: 4, roundTrip: 200 }),
+    row("near:1", { hostname: "Z near", clients: 4, roundTrip: 20 }),
+    row("busy:1", { hostname: "M busy", clients: 9, roundTrip: 300 }),
+  ];
+  assert.deepEqual(
+    store.visibleServers().map((item) => item.address),
+    ["busy:1", "near:1", "far:1"],
+  );
 });
 
 test("the ping ceiling never hides a server that published no round trip", () => {
@@ -184,11 +216,39 @@ test("the ping ceiling never hides a server that published no round trip", () =>
   assert.deepEqual(addresses, ["a:1", "c:1"]);
 });
 
-test("Not empty gates on the reported human connection count", () => {
+test("All folds servers with no players under one row that counts them", () => {
   reset();
-  store.state.servers = [row("a:1", { clients: 3 }), row("b:1", { clients: 0 })];
-  store.state.filters.notEmpty = true;
-  assert.deepEqual(store.visibleServers().map((visible) => visible.address), ["a:1"]);
+  store.state.servers = [
+    row("a:1", { clients: 3 }),
+    row("b:1", { clients: 0, bots: 6 }),
+    row("c:1", { clients: 0, bots: 0 }),
+  ];
+  const shut = store.scopedRows();
+  assert.deepEqual(shut.map((item) => item.kind), ["live", "empty-fold"]);
+  assert.equal(shut[1].count, 2);
+  assert.equal(shut[1].bots, 1);
+  assert.equal(store.foldedEmpty(), 2);
+
+  store.state.showEmpty = true;
+  assert.deepEqual(
+    store.scopedRows().map((item) => item.address).filter((address) => !address.startsWith("empty:")),
+    ["a:1", "b:1", "c:1"],
+  );
+  assert.equal(store.foldedEmpty(), 0);
+});
+
+test("a search unfolds empty servers so they can be found by name", () => {
+  reset();
+  store.state.servers = [row("a:1", { hostname: "Busy", clients: 3 }), row("b:1", { hostname: "Quiet" })];
+  store.state.filters.query = "quiet";
+  assert.deepEqual(store.scopedRows().map((item) => item.address), ["b:1"]);
+  assert.equal(store.foldedEmpty(), 0);
+});
+
+test("no fold is drawn when every server has players", () => {
+  reset();
+  store.state.servers = [row("a:1", { clients: 3 })];
+  assert.deepEqual(store.scopedRows().map((item) => item.kind), ["live"]);
 });
 
 test("filtering() reports whether anything is narrowing the list", () => {
@@ -203,13 +263,66 @@ test("filtering() reports whether anything is narrowing the list", () => {
   assert.equal(store.filtering(), true);
 });
 
+test("the Mode chip keeps only the ticked modes, whatever their case", () => {
+  reset();
+  store.state.servers = [
+    row("a:1", { mode: "Objective-Match" }),
+    row("b:1", { mode: "objective-match" }),
+    row("c:1", { mode: "Team-Match" }),
+    row("d:1", { mode: null }),
+  ];
+  store.state.filters.modes = ["objective-match"];
+  assert.deepEqual(store.visibleServers().map((visible) => visible.address).sort(), ["a:1", "b:1"]);
+  assert.equal(store.filtering(), true);
+});
+
+test("the Mode chip lists each published mode once, busiest first", () => {
+  reset();
+  store.state.servers = [
+    row("a:1", { mode: "Team-Match" }),
+    row("b:1", { mode: "Objective-Match" }),
+    row("c:1", { mode: "objective-match" }),
+    row("d:1", { mode: null }),
+  ];
+  store.state.filters.modes = ["freeze-tag"];
+  assert.deepEqual(
+    store.modeChoices().map((choice) => [choice.key, choice.count]),
+    [["objective-match", 2], ["team-match", 1], ["freeze-tag", 0]],
+  );
+});
+
+test("Ready to join keeps servers with nothing to download and a free slot", () => {
+  reset();
+  store.state.servers = [
+    row("ready:1", { clients: 4 }),
+    row("maps:1", { needs: 2 }),
+    row("full:1", { clients: 16, capacity: 16 }),
+  ];
+  store.state.filters.ready = true;
+  assert.deepEqual(store.visibleServers().map((visible) => visible.address), ["ready:1"]);
+});
+
+test("Clear all empties the search box and every chip", () => {
+  reset();
+  store.state.filters = { query: "x", maxPing: 80, modes: ["team-match"], ready: true };
+  store.clearFilters(store.state);
+  assert.equal(store.filtering(), false);
+});
+
+test("the chips are remembered across a restart", () => {
+  const storage = reset();
+  store.state.filters = { query: "sniper", maxPing: 150, modes: ["team-match"], ready: true };
+  store.saveFilters();
+  reset({ "reveille.filters": storage.getItem("reveille.filters") });
+  store.loadFilters();
+  assert.deepEqual(store.state.filters, { query: "", maxPing: 150, modes: ["team-match"], ready: true });
+});
+
 /* Saved-preference migrations ----------------------------------------------- */
 
-test("the pre-rename filter key and scope value are still read", () => {
-  // An existing player's toggle has to survive the change from `hasPeople` to `notEmpty`.
+test("the pre-rename scope value is still read", () => {
   reset({
     "reveille.filters": JSON.stringify({
-      hasPeople: true,
       maxPing: 150,
       scope: "favourites",
       showAbsent: true,
@@ -217,7 +330,6 @@ test("the pre-rename filter key and scope value are still read", () => {
     }),
   });
   store.loadFilters();
-  assert.equal(store.state.filters.notEmpty, true);
   assert.equal(store.state.filters.maxPing, 150);
   assert.equal(store.state.scope, "favorites");
   assert.equal(store.state.showAbsent, true);
@@ -234,16 +346,26 @@ test("a ping ceiling the toolbar does not offer is not restored", () => {
 test("a corrupt preference blob leaves the defaults standing", () => {
   reset({ "reveille.filters": "{not json" });
   assert.doesNotThrow(() => store.loadFilters());
-  assert.deepEqual(store.state.filters, { query: "", notEmpty: false, maxPing: null });
+  assert.deepEqual(store.state.filters, { query: "", maxPing: null, modes: [], ready: false });
 });
 
 test("the search box is deliberately not persisted", () => {
   const storage = reset();
   store.state.filters.query = "sniper";
-  store.state.filters.notEmpty = true;
+  store.state.showEmpty = true;
   store.saveFilters();
   assert.equal(storage.json("reveille.filters").query, "");
-  assert.equal(storage.json("reveille.filters").notEmpty, true);
+  assert.equal(storage.json("reveille.filters").showEmpty, true);
+});
+
+test("a hidden detail pane stays hidden after a restart", () => {
+  const storage = reset();
+  store.state.detailCollapsed = true;
+  store.saveFilters();
+  store.state.detailCollapsed = false;
+  reset({ "reveille.filters": storage.getItem("reveille.filters") });
+  store.loadFilters();
+  assert.equal(store.state.detailCollapsed, true);
 });
 
 /* Scoped rows and the disclosure (H15) -------------------------------------- */
@@ -344,9 +466,37 @@ test("the All scope draws no disclosure and no absent entries", () => {
     }),
   );
   store.state.scope = "all";
-  store.state.servers = [row("here:1")];
+  store.state.servers = [row("here:1", { clients: 2 })];
   assert.deepEqual(store.scopedRows().map((item) => item.kind), ["live"]);
   assert.deepEqual(store.scopedAbsent(), []);
+});
+
+test("Watching lists this game's watched servers, answering ones first and the rest unfolded", () => {
+  const storage = reset();
+  storage.setItem(
+    "reveille.player-alerts",
+    JSON.stringify([
+      { game: "allied_assault", address: "1.2.3.4:12203", queryPort: 12300, hostname: "Quiet" },
+      { game: "allied_assault", address: "1.2.3.5:12203", queryPort: 12300, hostname: "Busy" },
+      { game: "spearhead", address: "1.2.3.6:12203", queryPort: 12300, hostname: "Other game" },
+    ]),
+  );
+  store.state.scope = "watching";
+  store.state.servers = [row("1.2.3.5:12203", { clients: 5 }), row("9.9.9.9:1", { clients: 9 })];
+  assert.deepEqual(
+    store.scopedRows().map((item) => [item.kind, item.address]),
+    [["live", "1.2.3.5:12203"], ["watched", "1.2.3.4:12203"]],
+  );
+  assert.deepEqual(store.scopedAbsent(), []);
+  store.state.watchReadings = new Map([["allied_assault|1.2.3.4:12203", { count: 2, checkedAt: 1 }]]);
+  assert.equal(store.watchReading("1.2.3.4:12203").count, 2);
+  assert.equal(store.watchReading("1.2.3.5:12203"), null);
+});
+
+test("the Watching scope is remembered like the others", () => {
+  reset({ "reveille.filters": JSON.stringify({ scope: "watching" }) });
+  store.loadFilters();
+  assert.equal(store.state.scope, "watching");
 });
 
 /* Re-checking ---------------------------------------------------------------*/
@@ -383,4 +533,30 @@ test("update mutates and then notifies exactly once", () => {
   unsubscribe();
   store.update(() => {});
   assert.equal(notified, 1, "an unsubscribed handler is not called again");
+});
+
+/* Freshness and trends ------------------------------------------------------ */
+
+test("a list turns stale five minutes after its sweep finished", () => {
+  reset();
+  const finished = Date.parse("2026-09-28T12:00:00Z");
+  store.state.browse = { ...store.state.browse, finishedAt: new Date(finished).toISOString() };
+  assert.equal(store.listIsStale(finished + store.STALE_AFTER_MS), false);
+  assert.equal(store.listIsStale(finished + store.STALE_AFTER_MS + 1), true);
+  store.state.browse = { ...store.state.browse, finishedAt: null };
+  assert.equal(store.listIsStale(finished + 3_600_000), false, "no list is not a stale list");
+});
+
+test("a row's trend compares players with the list it replaced, never bots", () => {
+  reset();
+  store.state.previousCounts = store.countsByAddress([
+    row("up:1", { clients: 2 }),
+    row("down:1", { clients: 9 }),
+    row("same:1", { clients: 4, bots: 1 }),
+  ]);
+  assert.deepEqual(store.playerTrend(row("up:1", { clients: 5 })), { direction: "up", before: 2 });
+  assert.deepEqual(store.playerTrend(row("down:1", { clients: 3 })), { direction: "down", before: 9 });
+  assert.equal(store.playerTrend(row("same:1", { clients: 4, bots: 8 })), null);
+  assert.equal(store.playerTrend(row("new:1", { clients: 4 })), null, "a server seen once has no trend");
+  store.state.previousCounts = new Map();
 });

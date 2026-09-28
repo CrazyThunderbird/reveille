@@ -4,6 +4,8 @@
 // on change; nothing else holds application state.
 
 import { favorites, history, historyByAddress } from "./bookmarks.js";
+import { occupancy, occupancyFill } from "./format.js";
+import { alertId, playerAlerts } from "./player-alerts.js";
 
 const INSTALL_KEY = "reveille.install";
 const FILTERS_KEY = "reveille.filters";
@@ -66,7 +68,15 @@ export const state = {
     cancelled: false,
     error: null,
     completedAt: null,
+    // The same moment as a timestamp, for the toolbar's "2 min ago".
+    finishedAt: null,
   },
+
+  /**
+   * Each server's player count in the list the current sweep replaced, keyed by address, so a row
+   * can say whether it is filling up or emptying. Empty after a change of game, engine or folder.
+   */
+  previousCounts: new Map(),
 
   /** The selected row's address, and the join preview once it arrives. */
   selected: null,
@@ -93,23 +103,33 @@ export const state = {
   /**
    * View state.
    *
-   * `notEmpty` keeps its persisted name: the filter asks whether at least one human connection
-   * occupies a slot, including someone still downloading or idle. The old `hasPeople` key is
-   * accepted below so existing preferences survive.
-   *
    * `maxPing` gates on the one round trip this sweep measured, not on the in-game ping — see
-   * `roundTrip` in lib/format.js. Null means no gate.
+   * `roundTrip` in lib/format.js. Null means no gate. `modes` holds the gametypes to keep, in the
+   * spelling servers publish; empty keeps every mode. `ready` keeps only the servers that can be
+   * joined now: no maps to download and a free slot.
    */
-  filters: { query: "", notEmpty: false, maxPing: null },
+  filters: { query: "", maxPing: null, modes: [], ready: false },
   sort: { column: "clients", direction: "desc" },
-  /** Which population the table lists: every answering server, the starred ones, or the launched ones. */
+  /**
+   * Whether All shows its servers with no players, which otherwise sit folded under one counted
+   * row. Most of the list is empty on a normal evening; folding them puts every populated server
+   * on the first screen.
+   */
+  showEmpty: false,
+  /** Whether the detail pane is hidden, giving the list the whole window. */
+  detailCollapsed: false,
+  /** Which population the table lists: every answering server, or the starred, watched or played ones. */
   scope: "all",
+  /** What the watch monitor last read for each watched server, keyed by `alertId`. */
+  watchReadings: new Map(),
+  /** Why the last player alert could not reach the desktop, or null. */
+  alertError: null,
   /**
    * Whether a saved scope's absent block is open.
    *
    * Shut by default. What it hides is stated on the disclosure that hides it, so a player can see
-   * that entries are folded away and how many (H15) — this is not a filter with an invisible
-   * effect, which is what got the old "Hide unavailable maps" toggle removed (docs/ui.md §2.1).
+   * that entries are folded away and how many — this is not a filter with an invisible
+   * effect, which is what got the old "Hide unavailable maps" toggle removed.
    */
   showAbsent: false,
 
@@ -136,9 +156,9 @@ export const state = {
    *
    * A sweep that cannot reach the master used to blank the table and leave the centre of the
    * window reading "Nothing has been checked yet" underneath an error in the corner — the two
-   * contradicting each other, with no next action in either (docs/design-review.md F6). The rows
+   * contradicting each other, with no next action in either. The rows
    * from the last sweep that did work are kept instead, and this is the clock time that says what
-   * they are: a past reading, not a current one (docs/ux-standards.md §4.5).
+   * they are: a past reading, not a current one.
    *
    * Null whenever the list on screen is this session's own answer.
    */
@@ -250,7 +270,7 @@ export function migrateInstallationPreferences(oldRoot, newRoot, engine, game) {
 
 /**
  * The games an install can actually run, which is not the same as the products detected in it:
- * an expansion needs the base game underneath it, and the Rust side decides that (rules H13/H14).
+ * an expansion needs the base game underneath it, and the Rust side decides that.
  */
 export function playableGames(install) {
   return install?.playable ?? [];
@@ -292,11 +312,14 @@ export function saveFilters() {
     localStorage.setItem(
       FILTERS_KEY,
       JSON.stringify({
-        notEmpty: state.filters.notEmpty,
         maxPing: state.filters.maxPing,
+        modes: state.filters.modes,
+        ready: state.filters.ready,
         sort: state.sort,
         scope: state.scope,
         showAbsent: state.showAbsent,
+        showEmpty: state.showEmpty,
+        detailCollapsed: state.detailCollapsed,
         query: "",
       }),
     );
@@ -309,12 +332,11 @@ export function loadFilters() {
   try {
     const saved = JSON.parse(localStorage.getItem(FILTERS_KEY) ?? "null");
     if (!saved) return;
-    // `hasPeople` is the pre-rename key. Read once so an existing player's toggle survives the
-    // rename; nothing writes it any more.
     state.filters = {
       query: "",
-      notEmpty: !!(saved.notEmpty ?? saved.hasPeople),
       maxPing: PING_LIMITS.includes(saved.maxPing) ? saved.maxPing : null,
+      modes: Array.isArray(saved.modes) ? saved.modes.filter((mode) => typeof mode === "string") : [],
+      ready: saved.ready === true,
     };
     if (saved.sort?.column) state.sort = saved.sort;
     // `favourites` is the pre-rename scope value, mapped so a player who left the app on that
@@ -322,6 +344,8 @@ export function loadFilters() {
     const scope = saved.scope === "favourites" ? "favorites" : saved.scope;
     if (SCOPES.includes(scope)) state.scope = scope;
     state.showAbsent = !!saved.showAbsent;
+    state.showEmpty = !!saved.showEmpty;
+    state.detailCollapsed = !!saved.detailCollapsed;
   } catch {
     // Ignore a corrupt preference rather than refusing to start.
   }
@@ -329,7 +353,7 @@ export function loadFilters() {
 
 /* Derived ------------------------------------------------------------------ */
 
-export const SCOPES = ["all", "favorites", "history"];
+export const SCOPES = ["all", "favorites", "watching", "history"];
 
 const SORTERS = {
   name: (row) => row.server.hostname.toLowerCase(),
@@ -351,8 +375,7 @@ const SORTERS = {
  *
  * A sort is not a filter. Sorting by players surfaces full servers on the other side of the
  * world; sorting by ping surfaces empty ones next door. Shipping the sort without the filter is a
- * documented failure across several modern browsers, and Doomseeker has had this since the 2000s
- * (docs/ux-standards.md §7, docs/design-review.md F15).
+ * documented failure across several modern browsers, and Doomseeker has had this since the 2000s.
  */
 export const PING_LIMITS = [null, 80, 150, 250];
 
@@ -361,28 +384,74 @@ export const PING_LIMITS = [null, 80, 150, 250];
  *
  * The query matches the **address** as well as the name. It matched only the name here while
  * `partitionScope` below matched both, so pasting an IP into All said "Nothing matches" with the
- * server on screen, and the same paste in Favorites found it (docs/design-review.md F13).
+ * server on screen, and the same paste in Favorites found it.
  */
 function matchesFilters(row) {
   const query = state.filters.query.trim().toLowerCase();
   if (query) {
-    const name = row.server.hostname.toLowerCase();
-    if (!name.includes(query) && !row.address.includes(query)) return false;
+    const fields = [
+      row.server.hostname,
+      row.address,
+      row.server.current_map ?? "",
+      row.server.game_type ?? "",
+    ];
+    if (!fields.some((field) => field.toLowerCase().includes(query))) return false;
   }
-  if (state.filters.notEmpty && (row.server.occupancy?.clients_reported ?? 0) < 1) return false;
   const limit = state.filters.maxPing;
   // A server that published no round trip is not gated by a ceiling it cannot be measured
   // against: hiding it would be a claim about a figure that does not exist.
   const trip = row.server.status_round_trip;
   if (limit !== null && trip !== null && trip !== undefined && Number(trip) > limit) return false;
+  const { modes } = state.filters;
+  if (modes.length && !modes.includes(modeKey(row.server.game_type))) return false;
+  if (state.filters.ready && !readyToJoin(row)) return false;
   return true;
+}
+
+/** Gametypes compared without case: servers spell the same mode differently. */
+export function modeKey(gameType) {
+  return (gameType ?? "").trim().toLowerCase();
+}
+
+/** Whether a live row can be joined at once: nothing to download and a slot free. */
+export function readyToJoin(row) {
+  if (row.compatibility?.state?.state !== "compatible") return false;
+  return !occupancyFill(occupancy(row.server)).full;
+}
+
+/**
+ * The modes the servers in this list publish, busiest first, for the Mode chip. A mode kept by the
+ * filter stays listed after the servers running it are gone, so it can still be unticked.
+ */
+export function modeChoices() {
+  const choices = new Map();
+  for (const row of state.servers) {
+    const key = modeKey(row.server.game_type);
+    if (!key) continue;
+    const choice = choices.get(key) ?? { key, label: row.server.game_type.trim(), count: 0 };
+    choice.count += 1;
+    choices.set(key, choice);
+  }
+  for (const key of state.filters.modes) {
+    if (!choices.has(key)) choices.set(key, { key, label: key, count: 0 });
+  }
+  return [...choices.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+/** Whether a toolbar filter other than the search box is set. */
+export function chipFiltering() {
+  const { maxPing, modes, ready } = state.filters;
+  return maxPing !== null || modes.length > 0 || ready;
 }
 
 /** Whether any filter is narrowing the list right now. */
 export function filtering() {
-  return Boolean(
-    state.filters.query.trim() || state.filters.notEmpty || state.filters.maxPing !== null,
-  );
+  return Boolean(state.filters.query.trim() || chipFiltering());
+}
+
+/** Clear the search box and every chip. */
+export function clearFilters(next) {
+  next.filters = { query: "", maxPing: null, modes: [], ready: false };
 }
 
 /** The rows the table should show, after search, filters and sort. */
@@ -397,14 +466,67 @@ function sortRows(rows) {
   return rows.sort((left, right) => {
     const a = key(left, launches);
     const b = key(right, launches);
-    if (a === b) return left.server.hostname.localeCompare(right.server.hostname);
+    if (a === b) {
+      // Among equally busy servers the closer one is the better pick.
+      if (state.sort.column === "clients") {
+        const nearer = SORTERS.ping(left) - SORTERS.ping(right);
+        if (nearer !== 0) return nearer;
+      }
+      return left.server.hostname.localeCompare(right.server.hostname);
+    }
     return a > b ? direction : -direction;
   });
 }
 
-/** The entries a saved scope draws from: the starred ones, or the launched ones. */
+/** How old a list may get before the toolbar marks it and a return to the window refreshes it. */
+export const STALE_AFTER_MS = 5 * 60_000;
+
+/** Whether the list on screen finished longer ago than `STALE_AFTER_MS`. */
+export function listIsStale(now = Date.now()) {
+  const finished = Date.parse(state.browse.finishedAt ?? "");
+  return Number.isFinite(finished) && now - finished > STALE_AFTER_MS;
+}
+
+/** Player counts by address, for the next sweep to compare against. Bots are not counted. */
+export function countsByAddress(rows) {
+  const counts = new Map();
+  for (const row of rows) {
+    const clients = row.server.occupancy?.clients_reported;
+    if (Number.isInteger(clients)) counts.set(row.address, clients);
+  }
+  return counts;
+}
+
+/** "up" or "down" when a server's player count moved since the last measurement, else null. */
+export function playerTrend(row) {
+  const before = state.previousCounts.get(row.address);
+  const now = row.server.occupancy?.clients_reported;
+  if (!Number.isInteger(before) || !Number.isInteger(now) || before === now) return null;
+  return { direction: now > before ? "up" : "down", before };
+}
+
+/** The servers watched in the game this session is browsing, shaped like saved entries. */
+export function watchedEntries() {
+  return playerAlerts()
+    .filter((entry) => entry.game === state.game)
+    .map((entry) => ({
+      address: entry.address,
+      queryPort: entry.queryPort,
+      hostname: entry.hostname ?? "",
+      threshold: entry.threshold,
+    }));
+}
+
+/** What the monitor last read for a watched address in this game, or null before its first probe. */
+export function watchReading(address) {
+  return state.watchReadings.get(alertId({ game: state.game, address })) ?? null;
+}
+
+/** The entries a saved scope draws from: the starred, watched or launched ones. */
 export function savedEntries() {
-  return state.scope === "favorites" ? favorites() : history();
+  if (state.scope === "favorites") return favorites();
+  if (state.scope === "watching") return watchedEntries();
+  return history();
 }
 
 /**
@@ -440,7 +562,7 @@ function partitionScope() {
 
 /** The remembered entries in this scope that the current check did not return. */
 export function scopedAbsent() {
-  if (state.scope === "all") return [];
+  if (state.scope === "all" || state.scope === "watching") return [];
   return partitionScope().absent;
 }
 
@@ -450,23 +572,55 @@ export function scopedAbsent() {
  *
  * A remembered server the current sweep did not return is **not** dropped and **not** drawn with
  * the figures it had last time. It comes back as `absent`, carrying only its address and the name
- * it was starred under, and the view says so (docs/rules.md H12). Absent entries always follow the
+ * it was starred under, and the view says so. Absent entries always follow the
  * live rows: there is nothing to sort them by.
  *
- * They are also **collapsed behind a disclosure that states how many there are** (H15). Each of
+ * They are also **collapsed behind a disclosure that states how many there are**. Each of
  * the three games registers with the master separately, so a server starred while browsing another
  * one can never appear in this check and would otherwise sit in the list for ever, unanswerable —
  * often outnumbering the rows that did answer. The `disclosure` item is emitted whenever there is
  * anything behind it, open or shut, so the count is on screen either way: rows may be folded away,
  * never silently dropped.
  */
+/** Whether a live row has anyone on it. Bots do not count: nobody plays with a bot by choice. */
+export function hasPlayers(row) {
+  return (row.server.occupancy?.clients_reported ?? 0) > 0;
+}
+
+/**
+ * All, with the servers nobody is playing on folded under one counted row. A search unfolds
+ * them, because a player looking for a server by name wants it whether or not it is busy.
+ */
+function allRows() {
+  const rows = visibleServers();
+  const live = (row) => ({ kind: "live", address: row.address, row });
+  if (state.filters.query.trim()) return rows.map(live);
+  const busy = rows.filter(hasPlayers);
+  const empty = rows.filter((row) => !hasPlayers(row));
+  if (!empty.length) return busy.map(live);
+  const bots = empty.filter((row) => (row.server.occupancy?.bots_reported ?? 0) > 0).length;
+  return [
+    ...busy.map(live),
+    { kind: "empty-fold", address: `empty:${empty.length}:${state.showEmpty}`, count: empty.length, bots },
+    ...(state.showEmpty ? empty.map(live) : []),
+  ];
+}
+
+/** How many servers the empty fold is hiding right now, for the status bar. */
+export function foldedEmpty() {
+  if (state.scope !== "all" || state.showEmpty || state.filters.query.trim()) return 0;
+  return visibleServers().filter((row) => !hasPlayers(row)).length;
+}
+
 export function scopedRows() {
-  if (state.scope === "all") {
-    return visibleServers().map((row) => ({ kind: "live", address: row.address, row }));
-  }
+  if (state.scope === "all") return allRows();
   const { rows, absent } = partitionScope();
   const listed = sortRows(rows).map((row) => ({ kind: "live", address: row.address, row }));
   if (!absent.length) return listed;
+  // Watched servers are few and are being probed anyway, so what the monitor saw is always shown.
+  if (state.scope === "watching") {
+    return [...listed, ...absent.map((entry) => ({ kind: "watched", address: entry.address, entry }))];
+  }
   return [
     ...listed,
     // The count and the open state ride in `address` because that is what the view's row
@@ -523,7 +677,7 @@ export function rememberReadyJoin(next, row, result) {
  *
  * A check that ran and got no answer is evidence about *now*, and it outranks whatever the sweep
  * saw. The live row for this address is **dropped** rather than left standing with figures this
- * check has just shown are no longer current (docs/rules.md H12) — and its freshness stamp goes
+ * check has just shown are no longer current — and its freshness stamp goes
  * with it, because a time is a claim about a measurement that no longer exists.
  *
  * `dropped` carries the name the row had, so the pane can still say what the check was about.
@@ -560,6 +714,9 @@ export function applyCheckedRow(next, entry, result, dropped, at) {
     next.checks.set(entry.address, { status: "absent", movedTo: result.row.address, dropped });
   } else {
     next.checks.delete(entry.address);
+    const before = next.servers.find((row) => row.address === entry.address);
+    const clients = before?.server.occupancy?.clients_reported;
+    if (Number.isInteger(clients)) next.previousCounts.set(entry.address, clients);
   }
   next.servers = [
     ...next.servers.filter(
