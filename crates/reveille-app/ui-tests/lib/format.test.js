@@ -70,6 +70,40 @@ test("clients and bots are returned as separate figures, never summed", () => {
   assert.deepEqual(counts, { clients: 0, bots: 6, capacity: 32 });
 });
 
+test("the roster puts the most kills first and keeps server order when no scores were sent", () => {
+  const scored = format.playerRoster({
+    players: [
+      { name: "Raven", kills: 2, deaths: 5 },
+      { name: "Goat", kills: 9, deaths: 1 },
+      { name: "Fox", kills: 2, deaths: 1 },
+    ],
+  });
+  assert.deepEqual(
+    scored.map((player) => player.name),
+    ["Goat", "Fox", "Raven"],
+  );
+
+  const unscored = format.playerRoster({ players: [{ name: "Raven" }, { name: "Goat" }] });
+  assert.deepEqual(
+    unscored.map((player) => player.name),
+    ["Raven", "Goat"],
+  );
+  assert.deepEqual(format.playerRoster({}), []);
+});
+
+test("the roster admits a shortfall only when names fall short of the count", () => {
+  const server = { occupancy: { clients_reported: 32 } };
+  assert.equal(format.rosterShortfall(server, 30), "The server listed 30 of its 32 players.");
+  assert.equal(format.rosterShortfall(server, 32), null);
+  assert.equal(format.rosterShortfall({}, 3), null);
+});
+
+test("the search note names the first player found and counts the rest", () => {
+  assert.equal(format.playersFoundText([]), null);
+  assert.equal(format.playersFoundText(["Goat"]), "Playing: Goat");
+  assert.equal(format.playersFoundText(["Goat", "Goat #2", "Goat #3"]), "Playing: Goat and 2 more");
+});
+
 test("zero bots are null so nothing draws a +0", () => {
   const counts = format.occupancy({ occupancy: { clients_reported: 4, bots_reported: 0 } });
   assert.equal(counts.bots, null);
