@@ -23,6 +23,7 @@
 import { el, fill, frag, preserveFocus } from "../lib/dom.js";
 import {
   bytes,
+  clockTime,
   displayPath,
   engineLabel,
   gameType,
@@ -121,19 +122,19 @@ function body(row, actions, onRecheck, onTogglePlayerAlert) {
   const result = state.joinResult?.address === row.address ? state.joinResult : null;
 
   return frag(
-    header(row, server, onTogglePlayerAlert),
+    header(row, server, onRecheck, onTogglePlayerAlert),
     facts(server),
     result ? outcomeSection(result) : null,
     run ? installSection(run) : null,
     !run && !result ? needsSection(assessment, preview, server) : null,
     actions,
     playersSection(server),
-    freshness(row, onRecheck),
+    afterChecks(row.address),
     more(row, server),
   );
 }
 
-function header(row, server, onTogglePlayerAlert) {
+function header(row, server, onRecheck, onTogglePlayerAlert) {
   const starred = isFavorite(row.address);
   const watch = playerAlert(state.game, row.address);
   const watched = Boolean(watch);
@@ -182,9 +183,41 @@ function header(row, server, onTogglePlayerAlert) {
           `${watch.threshold}+`,
           el("span", { className: "mark-toggle__caret", "aria-hidden": "true" }, "▾"),
         ),
+      reloadButton(row, onRecheck),
     ),
   );
 }
+
+/**
+ * The selected server, asked again on its own. No Stop, unlike the toolbar's Refresh: one server
+ * gives up within the probe timeout, too soon for a Stop to be worth reaching for.
+ */
+function reloadButton(row, onRecheck) {
+  const checking = state.checks.get(row.address)?.status === "checking";
+  const sweeping = state.browse.running;
+  const at = state.checkedAt.get(row.address) ?? state.browse.finishedAt;
+  return el(
+    "button",
+    {
+      type: "button",
+      className: checking ? "pane-reload pane-reload--running" : "pane-reload",
+      // `aria-disabled`, not `disabled`: this button disables itself the moment it is pressed,
+      // and focus cannot be restored to a disabled element after the repaint, so a keyboard
+      // player would lose the caret on every check. `canRecheck` refuses the press instead.
+      "aria-disabled": canRecheck(row.address) ? null : "true",
+      "aria-label": checking ? "Refreshing this server" : "Refresh this server",
+      dataset: { focusKey: "detail-recheck" },
+      title: sweeping
+        ? "The whole list is being refreshed, this server with it"
+        : at
+          ? `Figures from ${clockTime(new Date(at))}. Refresh this server (R)`
+          : "Refresh this server (R)",
+      onclick: () => onRecheck(row),
+    },
+    icon("reload", { outline: true }),
+  );
+}
+
 
 /** The watch's one rule: how many players make it worth a notification. Bots never count. */
 function openWatchRule(anchor, row, watch, onTogglePlayerAlert) {
@@ -476,44 +509,21 @@ function pingLimits(server) {
 }
 
 /**
- * When this row was measured, and the control that measures it again. Every figure above has been
- * ageing since, so a server that filled up ten minutes ago would otherwise still read as empty.
- * Hidden while a sweep runs, which is already re-asking this row.
+ * What a check left to say beyond the new figures, and when the game was last started here.
+ *
+ * A check that never ran is not a server that did not answer, and the figures above are still
+ * the last thing actually measured. Saying so is what stops an unchanged age from reading as a
+ * fresh confirmation.
  */
-function freshness(row, onRecheck) {
-  if (state.browse.running) return launchedLine(row.address);
-  const check = state.checks.get(row.address);
-  return el(
-    "div",
-    { className: "detail__freshness" },
-    el(
-      "div",
-      { className: "detail__freshness-row" },
-      checkedLine(row.address),
-      el(
-        "button",
-        {
-          type: "button",
-          className: "btn btn--sm",
-          // `aria-disabled`, not `disabled`: this button disables itself the moment it is pressed,
-          // and focus cannot be restored to a disabled element after the repaint, so a keyboard
-          // player would lose the caret on every check. `canRecheck` refuses the press instead.
-          "aria-disabled": canRecheck(row.address) ? null : "true",
-          dataset: { focusKey: "detail-recheck" },
-          title: "Ask this one server again, without re-checking the whole list (R)",
-          onclick: () => onRecheck(row),
-        },
-        check?.status === "checking" ? "Checking…" : "Check again",
-      ),
-    ),
-    // A command that never ran is not a server that did not answer, and the figures above are still
-    // the last thing actually measured. Saying so is what stops an unchanged timestamp from reading
-    // as a fresh confirmation.
-    check?.status === "failed"
+function afterChecks(address) {
+  const check = state.checks.get(address);
+  const failed =
+    check?.status === "failed" && !state.browse.running
       ? el("p", { className: "error", role: "alert" }, `The check could not run. ${check.error}`)
-      : null,
-    launchedLine(row.address),
-  );
+      : null;
+  const launched = launchedLine(address);
+  if (!failed && !launched) return null;
+  return el("div", { className: "detail__freshness" }, failed, launched);
 }
 
 function launchedLine(address) {
@@ -523,26 +533,6 @@ function launchedLine(address) {
     "p",
     { className: "quiet", title: "Last time Reveille started the game on this server." },
     launched,
-  );
-}
-
-// A swept row is timed by when the sweep finished, not when this server answered, so its title
-// says which list it came from.
-function checkedLine(address) {
-  const own = state.checkedAt.get(address);
-  if (own) {
-    return el(
-      "p",
-      { className: "quiet", title: "This server was asked again then. The figures are that reply." },
-      `Updated ${own}`,
-    );
-  }
-  const swept = state.browse.completedAt;
-  if (!swept) return el("p", { className: "quiet" }, "");
-  return el(
-    "p",
-    { className: "quiet", title: "The figures on this row come from that list, and not since." },
-    `Updated ${swept}`,
   );
 }
 
@@ -947,7 +937,7 @@ function goneActions(address, check, onRecheck) {
       {
         type: "button",
         className: "btn btn--block",
-        // Focusable while busy, for the same reason as the freshness control above.
+        // Focusable while busy, for the same reason as the header's refresh control.
         "aria-disabled": canRecheck(address) ? null : "true",
         dataset: { focusKey: "detail-recheck" },
         onclick: () =>
@@ -1048,7 +1038,7 @@ function actionBar(row, onInstallServerFiles, onJoin) {
               ? onInstallServerFiles(row)
               : onJoin(row, kind !== "compatible"),
         },
-        busy ? "Working…" : checking ? "Checking…" : joinLabel(kind, totals),
+        busy ? "Working…" : joinLabel(kind, totals),
       ),
     ),
   );

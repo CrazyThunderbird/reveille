@@ -228,3 +228,20 @@ test("an activated row that needs downloads focuses the priced Join once it can 
   view.render();
   assert.equal(root.querySelector('[data-focus-key="join"]').focusCount, 0);
 });
+
+test("the header refreshes this server and spins while it is asked", () => {
+  const { root, view } = renderView({ assessment: assessment(), catalogue: exactCatalogue() });
+  store.state.checkedAt = new Map([[ADDRESS, new Date().toISOString()]]);
+  view.render();
+  const reload = root.querySelector('[data-focus-key="detail-recheck"]');
+  assert.equal(reload.getAttribute("aria-label"), "Refresh this server");
+  assert.doesNotMatch(textOf(root), /Check again/u);
+
+  store.state.checks = new Map([[ADDRESS, { status: "checking" }]]);
+  view.render();
+  const running = root.querySelector('[data-focus-key="detail-recheck"]');
+  assert.equal(running.getAttribute("aria-disabled"), "true");
+  assert.equal(running.getAttribute("aria-label"), "Refreshing this server");
+  // The header says a check is running; Join keeps its own label rather than repeating it.
+  assert.doesNotMatch(textOf(root.querySelector('[data-focus-key="join"]')), /Checking/u);
+});
