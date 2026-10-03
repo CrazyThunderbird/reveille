@@ -2,28 +2,16 @@
 
 // What the remote console remembers while Reveille runs, and how it words what a server said.
 //
-// Nothing here touches storage. An rcon password is a credential for a server the player does not
-// necessarily own, and a command can be `set rconpassword …`; a launcher whose job is joining
-// games has no business leaving either on disk. Both live in this module's memory and go when
-// the process does.
+// The command history lives in this module's memory and goes when the process does: a command can
+// be `set rconpassword …`, which has no business on disk. The password itself is not kept here
+// at all. The Rust side keeps it in the system credential store, and this side never receives it.
 
 const HISTORY_LIMIT = 50;
 
 export function createRconMemory() {
-  const passwords = new Map();
   const history = [];
 
   return {
-    password: (address) => passwords.get(address) ?? "",
-
-    rememberPassword(address, password) {
-      if (password) passwords.set(address, password);
-    },
-
-    forgetPassword(address) {
-      passwords.delete(address);
-    },
-
     remember(command) {
       if (!command || history.at(-1) === command) return;
       history.push(command);
@@ -98,6 +86,29 @@ function describeReply(reply) {
   return output
     ? { tone: "output", text: output + cut, password: "accepted" }
     : { tone: "notice", text: `(no output)${cut}`, password: "accepted" };
+}
+
+const NOTES = {
+  saved: "Password saved in the system credential store.",
+  not_saved: "The command worked, but the system credential store would not keep the password.",
+  forgotten: "The saved password was refused by the server, so it was removed.",
+};
+
+/** What became of the saved password, as a console line; `null` when nothing changed. */
+export function describePasswordNote(note) {
+  return NOTES[note] ?? null;
+}
+
+/** The map a console command may name: what the server's own file listing can produce. */
+export function isSafeMapName(name) {
+  return /^[A-Za-z0-9_\-./]{1,63}$/u.test(name) && !name.split("/").some((part) => part === "" || part === "." || part === "..");
+}
+
+/** How one client appears in the player list. */
+export function playerLabel(player) {
+  const state = player.state === "connecting" ? " · connecting" : player.state === "zombie" ? " · dropping" : "";
+  const ping = player.ping === null || player.ping === undefined ? "" : ` · ${player.ping} ms`;
+  return `#${player.slot} ${player.name || "(no name)"}${ping}${state}`;
 }
 
 /** A reason from the Rust side, which is lower-case and unpunctuated, read as a sentence. */

@@ -6,6 +6,7 @@ mod client;
 mod model;
 mod protocol;
 mod rcon;
+mod rcon_parse;
 
 pub use client::{
     BrowseConfig, BrowseEvent, DiscoveryError, RequestError, browse, browse_streaming,
@@ -25,4 +26,7 @@ pub use protocol::{
 pub use rcon::{
     RconCommand, RconError, RconInputError, RconPassword, RconReply, RconTiming, RconVerdict,
     send_rcon,
+};
+pub use rcon_parse::{
+    RconPlayer, RconPlayerState, is_safe_map_name, parse_bsp_listing, parse_status_players,
 };

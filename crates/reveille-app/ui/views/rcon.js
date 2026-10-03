@@ -7,15 +7,30 @@
 // connectionless exchange with a password, which is also why it is offered next to the controls
 // that act on one server and not inside the join flow.
 //
-// The quick commands are the read-only ones. Anything that changes the server — map, kick, say —
-// is typed on purpose.
+// Kicking, banning and changing the map are picked from lists the server itself supplied, so a
+// player name or map never has to be typed. The password is kept by the system credential store;
+// this side only ever sends one the player just typed, and sends nothing to use the saved one.
 
-import { errorText, sendRconCommand } from "../lib/api.js";
+import {
+  errorText,
+  rconForgetPassword,
+  rconListMaps,
+  rconListPlayers,
+  rconPasswordSaved,
+  sendRconCommand,
+} from "../lib/api.js";
 import { openDialog } from "../lib/dialog.js";
 import { el } from "../lib/dom.js";
-import { describeOutcome, rconMemory } from "../lib/rcon-session.js";
+import {
+  describeOutcome,
+  describePasswordNote,
+  isSafeMapName,
+  playerLabel,
+  rconMemory,
+} from "../lib/rcon-session.js";
 
 const QUICK_COMMANDS = ["status", "serverinfo", "listbans"];
+const CONFIRM_MS = 4000;
 
 /** Open the console for a live server row. */
 export function openRconConsole(row) {
@@ -23,12 +38,13 @@ export function openRconConsole(row) {
   const name = row.server?.hostname || "(unnamed server)";
   let busy = false;
   let cursor = null;
+  let saved = false;
+  let players = [];
 
   const passwordInput = el("input", {
     type: "password",
     autocomplete: "off",
     spellcheck: false,
-    value: rconMemory.password(address),
     "aria-label": "Rcon password",
     onkeydown: (event) => {
       if (event.key !== "Enter" || event.isComposing) return;
@@ -36,6 +52,14 @@ export function openRconConsole(row) {
       commandInput.focus();
     },
   });
+
+  const rememberBox = el("input", { type: "checkbox", checked: true });
+  const forgetButton = el(
+    "button",
+    { type: "button", className: "btn btn--ghost btn--sm", onclick: () => void forget() },
+    "Forget saved password",
+  );
+  forgetButton.hidden = true;
 
   const log = el("div", {
     className: "rcon__log data",
@@ -72,6 +96,42 @@ export function openRconConsole(row) {
     ),
   );
 
+  const playerSelect = el("select", { "aria-label": "Player" });
+  playerSelect.append(el("option", { value: "" }, "Load the players first"));
+  playerSelect.onchange = refreshPlayerButtons;
+  const kickButton = actionButton("Kick", () => kickSelected());
+  const banButton = actionButton("Ban", () => banSelected());
+  const loadPlayersButton = el(
+    "button",
+    { type: "button", className: "btn btn--ghost btn--sm", onclick: () => void loadPlayers() },
+    "Load players",
+  );
+
+  const mapList = el("datalist", { id: "rcon-maps" });
+  const mapInput = el("input", {
+    type: "text",
+    autocomplete: "off",
+    spellcheck: false,
+    list: "rcon-maps",
+    placeholder: "Map, for example dm/mohdm1",
+    "aria-label": "Map",
+    onkeydown: (event) => {
+      if (event.key !== "Enter" || event.isComposing) return;
+      event.preventDefault();
+      void changeMap();
+    },
+  });
+  const mapButton = el(
+    "button",
+    { type: "button", className: "btn btn--ghost btn--sm", onclick: () => void changeMap() },
+    "Change map",
+  );
+  const loadMapsButton = el(
+    "button",
+    { type: "button", className: "btn btn--ghost btn--sm", onclick: () => void loadMaps() },
+    "Load maps",
+  );
+
   openDialog(
     "Remote console",
     el(
@@ -90,16 +150,65 @@ export function openRconConsole(row) {
         el("span", { className: "field" }, passwordInput),
       ),
       el(
+        "div",
+        { className: "rcon__remember" },
+        el("label", { className: "rcon__check" }, rememberBox, el("span", null, "Remember on this computer")),
+        forgetButton,
+      ),
+      el(
         "p",
         { className: "quiet" },
-        "Sent unencrypted, as the game does. Kept in memory until Reveille closes, never saved.",
+        "Sent unencrypted, as the game does. Remembered in the system credential store.",
+      ),
+      el(
+        "div",
+        { className: "rcon__tools" },
+        el("span", { className: "rcon__label" }, "Player"),
+        el("span", { className: "field" }, playerSelect),
+        el("span", { className: "rcon__buttons" }, loadPlayersButton, kickButton, banButton),
+        el("span", { className: "rcon__label" }, "Map"),
+        el("span", { className: "field" }, mapInput, mapList),
+        el("span", { className: "rcon__buttons" }, loadMapsButton, mapButton),
       ),
       log,
       quick,
       el("div", { className: "rcon__send" }, el("span", { className: "field" }, commandInput), sendButton),
     ),
   );
-  (passwordInput.value ? commandInput : passwordInput).focus();
+  passwordInput.focus();
+  void showSavedState();
+
+  async function showSavedState() {
+    try {
+      saved = await rconPasswordSaved(address);
+    } catch {
+      saved = false;
+    }
+    paintSaved();
+    if (saved) commandInput.focus();
+  }
+
+  function paintSaved() {
+    forgetButton.hidden = !saved;
+    passwordInput.placeholder = saved ? "Saved password in use" : "";
+  }
+
+  async function forget() {
+    let done = false;
+    try {
+      done = await rconForgetPassword(address);
+    } catch {
+      done = false;
+    }
+    if (done) {
+      saved = false;
+      paintSaved();
+      append("notice", "The saved password was removed.");
+      passwordInput.focus();
+    } else {
+      append("error", "The system credential store would not remove the password.");
+    }
+  }
 
   function append(tone, text) {
     log.append(el("pre", { className: `rcon__entry rcon__entry--${tone}` }, text));
@@ -114,39 +223,174 @@ export function openRconConsole(row) {
     sendButton.textContent = next ? "Sending…" : "Send";
   }
 
-  async function run(raw) {
-    const command = raw.trim();
-    if (busy || !command) return;
-    const password = passwordInput.value;
-    if (!password) {
+  /** The password to send: what was typed, or nothing so that the saved one is used. */
+  function typedPassword() {
+    return passwordInput.value || null;
+  }
+
+  /**
+   * One round trip. Prints what the server said, applies what became of the password, and returns
+   * the response, or `null` when nothing could be sent or the server refused.
+   */
+  async function exchange(echo, call) {
+    if (busy) return null;
+    if (!typedPassword() && !saved) {
       append("error", "Enter the rcon password first.");
       passwordInput.focus();
-      return;
+      return null;
     }
-
     setBusy(true);
-    append("echo", `> ${command}`);
-    rconMemory.remember(command);
-    cursor = null;
-    commandInput.value = "";
-
+    if (echo) append("echo", `> ${echo}`);
+    let response = null;
     let described;
     try {
-      described = describeOutcome(await sendRconCommand(address, password, command));
+      response = await call(typedPassword(), rememberBox.checked);
+      described = describeOutcome(response.outcome);
     } catch (error) {
       described = { tone: "error", text: errorText(error), password: "unknown" };
     }
     setBusy(false);
 
-    append(described.tone, described.text);
+    applyPasswordNote(response?.password);
     if (described.password === "rejected") {
-      rconMemory.forgetPassword(address);
+      append(described.tone, described.text);
+      passwordInput.value = "";
       passwordInput.focus();
-      passwordInput.select();
+      return null;
+    }
+    if (described.password === "accepted" && passwordInput.value && rememberBox.checked) {
+      passwordInput.value = "";
+    }
+    return { response, described };
+  }
+
+  function applyPasswordNote(note) {
+    if (note === "saved") saved = true;
+    if (note === "forgotten") saved = false;
+    paintSaved();
+    const text = describePasswordNote(note);
+    if (text) append(note === "not_saved" ? "notice" : "echo", text);
+  }
+
+  async function run(raw) {
+    const command = raw.trim();
+    if (!command) return;
+    rconMemory.remember(command);
+    cursor = null;
+    commandInput.value = "";
+    const result = await exchange(command, (password, remember) =>
+      sendRconCommand(address, password, command, remember),
+    );
+    if (result) {
+      append(result.described.tone, result.described.text);
+      commandInput.focus();
+    }
+  }
+
+  /* Players ------------------------------------------------------------- */
+
+  async function loadPlayers() {
+    const result = await exchange(null, (password, remember) =>
+      rconListPlayers(address, password, remember),
+    );
+    if (!result) return;
+    if (result.response.outcome.status !== "reply" || result.described.tone === "error") {
+      append(result.described.tone, result.described.text);
       return;
     }
-    if (described.password === "accepted") rconMemory.rememberPassword(address, password);
-    commandInput.focus();
+    players = result.response.players ?? [];
+    playerSelect.replaceChildren(
+      el("option", { value: "" }, players.length ? "Choose a player…" : "No players on the server"),
+      ...players.map((player) => el("option", { value: String(player.slot) }, playerLabel(player))),
+    );
+    refreshPlayerButtons();
+    append("notice", `${players.length} player${players.length === 1 ? "" : "s"} loaded.`);
+  }
+
+  function selectedPlayer() {
+    return players.find((player) => String(player.slot) === playerSelect.value) ?? null;
+  }
+
+  function refreshPlayerButtons() {
+    const player = selectedPlayer();
+    kickButton.setAttribute("aria-disabled", player ? "false" : "true");
+    // Bots and loopback clients have no address a ban could name.
+    const bannable = Boolean(player?.bannable);
+    banButton.setAttribute("aria-disabled", bannable ? "false" : "true");
+    banButton.title = player && !bannable ? "This client has no address that can be banned." : "";
+    kickButton.dataset.armed = "";
+    banButton.dataset.armed = "";
+    kickButton.textContent = "Kick";
+    banButton.textContent = "Ban";
+  }
+
+  async function kickSelected() {
+    const player = selectedPlayer();
+    if (!player) return;
+    await run(`clientkick ${player.slot}`);
+    await loadPlayers();
+  }
+
+  async function banSelected() {
+    const player = selectedPlayer();
+    if (!player?.bannable) return;
+    // `banaddr` is OpenMoHAA's; a stock server answers it as an unknown command.
+    await run(`banaddr ${player.slot}`);
+    await loadPlayers();
+  }
+
+  /** A button that must be pressed twice within a few seconds, so a slip kicks no one. */
+  function actionButton(label, act) {
+    const button = el("button", { type: "button", className: "btn btn--ghost btn--sm" }, label);
+    let timer = null;
+    button.setAttribute("aria-disabled", "true");
+    button.onclick = () => {
+      if (button.getAttribute("aria-disabled") === "true" || busy) return;
+      if (button.dataset.armed === "1") {
+        clearTimeout(timer);
+        button.dataset.armed = "";
+        button.textContent = label;
+        void act();
+        return;
+      }
+      button.dataset.armed = "1";
+      button.textContent = `Confirm ${label.toLowerCase()}?`;
+      timer = setTimeout(() => {
+        button.dataset.armed = "";
+        button.textContent = label;
+      }, CONFIRM_MS);
+    };
+    return button;
+  }
+
+  /* Maps ---------------------------------------------------------------- */
+
+  async function loadMaps() {
+    const result = await exchange(null, (password, remember) =>
+      rconListMaps(address, password, remember),
+    );
+    if (!result) return;
+    const maps = result.response.maps ?? [];
+    if (result.response.outcome.status !== "reply" || result.described.tone === "error" || !maps.length) {
+      append(
+        result.described.tone === "output" ? "notice" : result.described.tone,
+        maps.length ? result.described.text : "The server listed no maps. Type the map name instead.",
+      );
+      return;
+    }
+    mapList.replaceChildren(...maps.map((map) => el("option", { value: map })));
+    append("notice", `${maps.length} maps loaded, custom maps included. Start typing to filter.`);
+    mapInput.focus();
+  }
+
+  async function changeMap() {
+    const map = mapInput.value.trim();
+    if (!map) return;
+    if (!isSafeMapName(map)) {
+      append("error", "That is not a map name: use letters, digits, _ - . and / only.");
+      return;
+    }
+    await run(`map ${map}`);
   }
 
   function onCommandKey(event) {

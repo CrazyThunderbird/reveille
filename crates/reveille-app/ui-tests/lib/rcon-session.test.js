@@ -16,39 +16,9 @@ const tripwire = {
 globalThis.localStorage = tripwire;
 globalThis.sessionStorage = tripwire;
 
-const { createRconMemory, describeOutcome } = await import("../../ui/lib/rcon-session.js");
+const { createRconMemory, describeOutcome, describePasswordNote, isSafeMapName, playerLabel } = await import("../../ui/lib/rcon-session.js");
 
 /* Memory --------------------------------------------------------------------*/
-
-test("a password and a command are kept in memory and never in storage", () => {
-  const memory = createRconMemory();
-
-  memory.rememberPassword("203.0.113.10:12203", "hunter2");
-  memory.remember("set rconpassword hunter3");
-
-  assert.equal(memory.password("203.0.113.10:12203"), "hunter2");
-});
-
-test("a password belongs to one server, and forgetting it leaves the others", () => {
-  const memory = createRconMemory();
-  memory.rememberPassword("203.0.113.10:12203", "one");
-  memory.rememberPassword("203.0.113.11:12203", "two");
-
-  memory.forgetPassword("203.0.113.10:12203");
-
-  assert.equal(memory.password("203.0.113.10:12203"), "");
-  assert.equal(memory.password("203.0.113.11:12203"), "two");
-  assert.equal(memory.password("198.51.100.1:12203"), "", "an unknown server has none");
-});
-
-test("an empty password is not remembered over a good one", () => {
-  const memory = createRconMemory();
-  memory.rememberPassword("203.0.113.10:12203", "good");
-
-  memory.rememberPassword("203.0.113.10:12203", "");
-
-  assert.equal(memory.password("203.0.113.10:12203"), "good");
-});
 
 test("history walks back through commands and returns to an empty line", () => {
   const memory = createRconMemory();
@@ -180,4 +150,28 @@ test("an answer the console does not recognise is an error, never a silent succe
     assert.equal(described.tone, "error");
     assert.equal(described.password, "unknown");
   }
+});
+
+test("a password note is worded, and no change says nothing", () => {
+  assert.match(describePasswordNote("saved"), /saved/i);
+  assert.match(describePasswordNote("not_saved"), /would not keep/i);
+  assert.match(describePasswordNote("forgotten"), /removed/i);
+  assert.equal(describePasswordNote("unchanged"), null);
+  assert.equal(describePasswordNote(undefined), null);
+});
+
+test("only names a server could list are accepted as maps", () => {
+  assert.equal(isSafeMapName("dm/mohdm1"), true);
+  assert.equal(isSafeMapName("obj/obj_team1-v2"), true);
+  assert.equal(isSafeMapName("dm/mohdm1; quit"), false);
+  assert.equal(isSafeMapName("../x"), false);
+  assert.equal(isSafeMapName("a//b"), false);
+  assert.equal(isSafeMapName(""), false);
+  assert.equal(isSafeMapName("a".repeat(64)), false);
+});
+
+test("a player is labelled by slot, name, ping and any half-connected state", () => {
+  assert.equal(playerLabel({ slot: 3, name: "Goat", ping: 42, state: "playing" }), "#3 Goat · 42 ms");
+  assert.equal(playerLabel({ slot: 4, name: "Raven", ping: null, state: "connecting" }), "#4 Raven · connecting");
+  assert.equal(playerLabel({ slot: 5, name: "", ping: null, state: "zombie" }), "#5 (no name) · dropping");
 });
