@@ -6,9 +6,6 @@ name: Test build
 # installer `release.yml` produces: no installer, no updater key, no signing.
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "rcon-v*"
 
 permissions:
   contents: read
@@ -49,12 +46,12 @@ jobs:
           path: reveille-windows-test.zip
 
       - name: Attach it to a prerelease
-        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$GITHUB_REF_NAME" reveille-windows-test.zip \
-            --prerelease --title "Test build $GITHUB_REF_NAME" \
+          tag="rcon-test-$GITHUB_RUN_NUMBER"
+          gh release create "$tag" reveille-windows-test.zip --target "$GITHUB_SHA" \
+            --prerelease --title "Test build $tag" \
             --notes "Unsigned test build with the rcon console. Not an official release."
