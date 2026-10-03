@@ -27,6 +27,7 @@ mod app_icon;
 mod autostart;
 mod notice;
 mod popup;
+mod rcon;
 mod self_update;
 mod telemetry;
 mod tray;
@@ -2729,6 +2730,7 @@ fn main() {
             browse_servers,
             check_server,
             read_watched_server,
+            rcon::send_rcon_command,
             game_client_running,
             notice::send_player_notification,
             notice::send_reveille_notice,

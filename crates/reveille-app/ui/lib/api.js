@@ -24,6 +24,12 @@
 //   check_server(session, address, queryPort)  -> CheckResult
 //   read_watched_server(address, queryPort, game) -> { clients, bots, map, mode, round_trip } | null
 //   game_client_running()                      -> boolean | null
+//   send_rcon_command(address, password, command) -> RconOutcome
+//     `address` is the row's `ip:port`, the game port. Always resolves with one of
+//     `{ status: "reply", output, verdict, packets, truncated, round_trip }`,
+//     `{ status: "refused", reason }`, `{ status: "no_answer" }` or `{ status: "failed", detail }`;
+//     `verdict` is `executed`, `wrong_password` or `password_not_set`. It rejects only for an
+//     address it cannot read. The password and the command are never logged or counted.
 //   preview_join(session, address)             -> JoinPreview
 //   install_server_files(session, address)     -> ServerFilesResult
 //   install_and_launch(session, address, selectedCandidateIds, acceptIncomplete) -> JoinResult
@@ -113,6 +119,9 @@ export const readWatchedServer = ({ address, queryPort, game }) =>
   invoke("read_watched_server", { address, queryPort, game });
 
 export const gameClientRunning = () => invoke("game_client_running");
+
+export const sendRconCommand = (address, password, command) =>
+  invoke("send_rcon_command", { address, password, command });
 
 export const setCloseToTray = (enabled) => invoke("set_close_to_tray", { enabled });
 

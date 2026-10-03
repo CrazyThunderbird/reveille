@@ -56,6 +56,17 @@ const RESULTS = {
       round_trip: server?.status_round_trip ?? 48,
     };
   },
+  // The password is `hunter2`. `map …` stays silent, as a server mid-change does.
+  send_rcon_command: ({ password, command }) => {
+    if (password !== "hunter2") {
+      return { status: "reply", output: "Bad rconpassword.\n", verdict: "wrong_password", packets: 1, truncated: false, round_trip: 31 };
+    }
+    if (command.startsWith("map ")) return { status: "no_answer" };
+    const output = command === "status"
+      ? "map: dm/mohdm1\nnum score ping name            lastmsg address\n--- ----- ---- --------------- ------- ---------------------\n  0     7   42 Goat                  0 198.51.100.7:12203\n  1     3   61 Raven                 0 198.51.100.9:12203\n"
+      : "";
+    return { status: "reply", output, verdict: "executed", packets: 1, truncated: false, round_trip: 28 };
+  },
 };
 
 window.__TAURI__ = {
