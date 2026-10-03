@@ -7,20 +7,22 @@
 // connectionless exchange with a password, which is also why it is offered next to the controls
 // that act on one server and not inside the join flow.
 //
-// Kicking, banning and changing the map are picked from lists the server itself supplied, so a
-// player name or map never has to be typed. The password is kept by the system credential store;
+// Kicking and banning pick a client from the server's own `status`. Maps come from this computer's
+// game folder, because a stock 1.11 server will not list its own over rcon. The password is kept by the system credential store;
 // this side only ever sends one the player just typed, and sends nothing to use the saved one.
 
 import {
   errorText,
   rconForgetPassword,
-  rconListMaps,
+  rconLocalMaps,
   rconListPlayers,
   rconPasswordSaved,
   sendRconCommand,
 } from "../lib/api.js";
 import { openDialog } from "../lib/dialog.js";
 import { el } from "../lib/dom.js";
+import { forgetMap, mergeMaps, rememberMap, rememberedMaps } from "../lib/rcon-maps.js";
+import { session } from "../lib/store.js";
 import {
   describeOutcome,
   describePasswordNote,
@@ -40,6 +42,7 @@ export function openRconConsole(row) {
   let cursor = null;
   let saved = false;
   let players = [];
+  let localMaps = [];
 
   const passwordInput = el("input", {
     type: "password",
@@ -126,11 +129,18 @@ export function openRconConsole(row) {
     { type: "button", className: "btn btn--ghost btn--sm", onclick: () => void changeMap() },
     "Change map",
   );
-  const loadMapsButton = el(
+  const forgetMapButton = el(
     "button",
-    { type: "button", className: "btn btn--ghost btn--sm", onclick: () => void loadMaps() },
-    "Load maps",
+    {
+      type: "button",
+      className: "btn btn--ghost btn--sm",
+      title: "Remove this map from the list remembered for this server",
+      onclick: () => dropRemembered(),
+    },
+    "Remove",
   );
+  forgetMapButton.hidden = true;
+  mapInput.addEventListener("input", paintForgetMap);
 
   openDialog(
     "Remote console",
@@ -168,7 +178,7 @@ export function openRconConsole(row) {
         el("span", { className: "rcon__buttons" }, loadPlayersButton, kickButton, banButton),
         el("span", { className: "rcon__label" }, "Map"),
         el("span", { className: "field" }, mapInput, mapList),
-        el("span", { className: "rcon__buttons" }, loadMapsButton, mapButton),
+        el("span", { className: "rcon__buttons" }, forgetMapButton, mapButton),
       ),
       log,
       quick,
@@ -177,6 +187,7 @@ export function openRconConsole(row) {
   );
   passwordInput.focus();
   void showSavedState();
+  void loadMaps();
 
   async function showSavedState() {
     try {
@@ -365,22 +376,31 @@ export function openRconConsole(row) {
 
   /* Maps ---------------------------------------------------------------- */
 
+  function paintMaps() {
+    const names = mergeMaps(localMaps, rememberedMaps(address));
+    mapList.replaceChildren(...names.map((map) => el("option", { value: map })));
+    paintForgetMap();
+  }
+
+  function paintForgetMap() {
+    const typed = mapInput.value.trim().toLowerCase();
+    forgetMapButton.hidden = !rememberedMaps(address).some((map) => map.toLowerCase() === typed);
+  }
+
+  function dropRemembered() {
+    forgetMap(address, mapInput.value.trim());
+    paintMaps();
+  }
+
   async function loadMaps() {
-    const result = await exchange(null, (password, remember) =>
-      rconListMaps(address, password, remember),
-    );
-    if (!result) return;
-    const maps = result.response.maps ?? [];
-    if (result.response.outcome.status !== "reply" || result.described.tone === "error" || !maps.length) {
-      append(
-        result.described.tone === "output" ? "notice" : result.described.tone,
-        maps.length ? result.described.text : "The server listed no maps. Type the map name instead.",
-      );
+    paintMaps();
+    try {
+      localMaps = await rconLocalMaps(session());
+    } catch (error) {
+      append("notice", `This computer's maps could not be read: ${errorText(error)}`);
       return;
     }
-    mapList.replaceChildren(...maps.map((map) => el("option", { value: map })));
-    append("notice", `${maps.length} maps loaded, custom maps included. Start typing to filter.`);
-    mapInput.focus();
+    paintMaps();
   }
 
   async function changeMap() {
@@ -389,6 +409,12 @@ export function openRconConsole(row) {
     if (!isSafeMapName(map)) {
       append("error", "That is not a map name: use letters, digits, _ - . and / only.");
       return;
+    }
+    // Remembered only when this computer does not already have it, so the list stays the one
+    // place a map the player types by hand can come back from.
+    if (!localMaps.some((known) => known.toLowerCase() === map.toLowerCase())) {
+      rememberMap(address, map);
+      paintMaps();
     }
     await run(`map ${map}`);
   }

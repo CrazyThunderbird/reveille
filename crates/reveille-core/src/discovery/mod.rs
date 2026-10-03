@@ -27,6 +27,4 @@ pub use rcon::{
     RconCommand, RconError, RconInputError, RconPassword, RconReply, RconTiming, RconVerdict,
     send_rcon,
 };
-pub use rcon_parse::{
-    RconPlayer, RconPlayerState, is_safe_map_name, parse_bsp_listing, parse_status_players,
-};
+pub use rcon_parse::{RconPlayer, RconPlayerState, is_safe_map_name, parse_status_players};

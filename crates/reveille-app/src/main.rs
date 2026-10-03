@@ -2732,7 +2732,7 @@ fn main() {
             read_watched_server,
             rcon::send_rcon_command,
             rcon::rcon_list_players,
-            rcon::rcon_list_maps,
+            rcon::rcon_local_maps,
             rcon::rcon_password_saved,
             rcon::rcon_forget_password,
             game_client_running,

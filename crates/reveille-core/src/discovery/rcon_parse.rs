@@ -116,34 +116,6 @@ fn clean_name(raw: &str) -> String {
         .to_owned()
 }
 
-/// The maps in `fdir *.bsp` output, as the names `map` takes: `dm/mohdm1`, sorted, once each.
-///
-/// A map ships as `maps/<name>.bsp` and often also as `maps/<name>_sml.bsp`, and `map` wants the
-/// name without either ending (openmohaa `code/server/sv_ccmds.c:161-200`), so the two collapse.
-/// A name with anything outside letters, digits and `_-./` is dropped: the list is the server's
-/// own text and ends up in a command typed on its behalf.
-#[must_use]
-pub fn parse_bsp_listing(output: &str) -> Vec<String> {
-    let mut names: Vec<String> = output.lines().filter_map(map_name).collect();
-    names.sort_by_key(|name| name.to_ascii_lowercase());
-    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    names
-}
-
-fn map_name(line: &str) -> Option<String> {
-    let line = line.trim().replace('\\', "/");
-    let (prefix, rest) = line.split_at_checked(5)?;
-    if !prefix.eq_ignore_ascii_case("maps/") {
-        return None;
-    }
-    let stem = rest.get(..rest.len().checked_sub(4)?)?;
-    if !rest[stem.len()..].eq_ignore_ascii_case(".bsp") {
-        return None;
-    }
-    let stem = stem.strip_suffix("_sml").unwrap_or(stem);
-    is_safe_map_name(stem).then(|| stem.to_owned())
-}
-
 /// A name that is one token of letters, digits and `_-./`, with no empty or relative segment.
 #[must_use]
 pub fn is_safe_map_name(name: &str) -> bool {
@@ -159,7 +131,7 @@ pub fn is_safe_map_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{RconPlayerState, is_safe_map_name, parse_bsp_listing, parse_status_players};
+    use super::{RconPlayerState, is_safe_map_name, parse_status_players};
 
     // Shaped like openmohaa's own output: right-aligned numbers, a name padded to 15, an address
     // column as wide as the longest address.
@@ -281,43 +253,6 @@ this is not a client line
         let players = parse_status_players(status);
 
         assert_eq!(players.iter().map(|p| p.slot).collect::<Vec<_>>(), [0, 2]);
-    }
-
-    #[test]
-    fn maps_come_out_as_the_names_map_takes() {
-        let listing = "\
----------------
-maps/obj/obj_team1.bsp
-maps/dm/mohdm1.bsp
-maps/dm/mohdm1_sml.bsp
-maps/dm/MyCustom_v2.bsp
-3 files listed
-";
-
-        let maps = parse_bsp_listing(listing);
-
-        assert_eq!(maps, ["dm/mohdm1", "dm/MyCustom_v2", "obj/obj_team1"]);
-    }
-
-    #[test]
-    fn only_maps_under_maps_count_and_odd_names_are_dropped() {
-        let listing = "\
-models/crate.bsp
-maps/dm/ok.bsp
-maps/dm/has space.bsp
-maps/dm/semi;colon.bsp
-maps/../escape.bsp
-maps//double.bsp
-maps/dm/not_a_map.txt
-maps/.bsp
-";
-
-        assert_eq!(parse_bsp_listing(listing), ["dm/ok"]);
-    }
-
-    #[test]
-    fn windows_separators_in_a_listing_are_read_as_slashes() {
-        assert_eq!(parse_bsp_listing("maps\\dm\\mohdm2.bsp\n"), ["dm/mohdm2"]);
     }
 
     #[test]

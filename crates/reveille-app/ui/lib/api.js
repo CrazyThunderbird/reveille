@@ -126,8 +126,7 @@ export const sendRconCommand = (address, password, command, remember) =>
 export const rconListPlayers = (address, password, remember) =>
   invoke("rcon_list_players", { address, password, remember });
 
-export const rconListMaps = (address, password, remember) =>
-  invoke("rcon_list_maps", { address, password, remember });
+export const rconLocalMaps = (session) => invoke("rcon_local_maps", { session });
 
 export const rconPasswordSaved = (address) => invoke("rcon_password_saved", { address });
 

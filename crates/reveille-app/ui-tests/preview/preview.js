@@ -69,12 +69,7 @@ const RESULTS = {
     ];
     return response;
   },
-  rcon_list_maps: (args) => {
-    const response = rconFake(args, "fdir *.bsp");
-    if (response.outcome.verdict !== "executed") return response;
-    response.maps = ["dm/mohdm1", "dm/mohdm2", "obj/obj_team1", "custom/dm_arena_v2", "custom/dm_raid"];
-    return response;
-  },
+  rcon_local_maps: () => ["custom/dm_arena_v2", "dm/mohdm1", "dm/mohdm2", "obj/obj_team1", "obj/obj_team2"],
   rcon_password_saved: () => rconSaved,
   rcon_forget_password: () => {
     rconSaved = false;

@@ -17,13 +17,13 @@ use reveille_core::discovery::{
     self, GamePort, RconCommand, RconError, RconPassword, RconPlayer, RconReply, RconTiming,
     RconVerdict,
 };
+use reveille_core::mapindex::MapIndex;
 use serde::Serialize;
 use thiserror::Error;
 use tracing::{info, warn};
 
 // openmohaa `code/qcommon/files.cpp:2910`: `fdir <filter>` lists matching files in every pak and
 // directory the server has, which `dir` does not — `dir` reads one folder and never descends.
-const LIST_MAPS: &str = "fdir *.bsp";
 // openmohaa `code/server/sv_ccmds.c:1217`.
 const LIST_PLAYERS: &str = "status";
 const CREDENTIAL_SERVICE: &str = "Reveille remote console";
@@ -74,9 +74,6 @@ pub struct RconResponse {
     /// The clients, for the player list. Empty for anything else.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub players: Vec<RconPlayer>,
-    /// The maps, for the map list. Empty for anything else.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub maps: Vec<String>,
 }
 
 /// The credential store failed.
@@ -293,7 +290,6 @@ pub async fn send_rcon_command(
         outcome,
         password,
         players: Vec::new(),
-        maps: Vec::new(),
     })
 }
 
@@ -317,32 +313,31 @@ pub async fn rcon_list_players(
         outcome,
         password,
         players: players.unwrap_or_default(),
-        maps: Vec::new(),
     })
 }
 
-/// Every map the server can load, custom ones included, read from `fdir *.bsp`.
+/// The maps this computer has, custom ones included, as the names `map` takes.
+///
+/// A stock 1.11 server cannot list its own maps over rcon, and `fdir` only sees one folder level,
+/// so the multiplayer maps under `maps/dm` and `maps/obj` never appear in it. A player needs the
+/// same files to join, which makes the local game folder the list that is both complete and safe.
 #[tauri::command]
-pub async fn rcon_list_maps(
-    address: String,
-    password: Option<String>,
-    remember: bool,
-) -> Result<RconResponse, String> {
-    let address = parse_address(&address)?;
-    let request = Request {
-        address,
-        password,
-        command: LIST_MAPS.to_owned(),
-        remember,
-    };
-    let (outcome, password) = exchange(&system_store(), request, RconTiming::default()).await;
-    let maps = executed_output(&outcome).map(discovery::parse_bsp_listing);
-    Ok(RconResponse {
-        outcome,
-        password,
-        players: Vec::new(),
-        maps: maps.unwrap_or_default(),
+pub async fn rcon_local_maps(session: crate::Session) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::installed_maps(&session).map(|index| local_map_names(&index))
     })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn local_map_names(index: &MapIndex) -> Vec<String> {
+    let mut names: Vec<String> = index
+        .maps()
+        .map(|map| map.name.as_str().to_owned())
+        .filter(|name| !name.ends_with("_sml") && discovery::is_safe_map_name(name))
+        .collect();
+    names.sort();
+    names
 }
 
 /// Whether a password is remembered for this server. A store that cannot be read says no.
@@ -414,7 +409,10 @@ mod tests {
     use serde_json::json;
     use tokio::net::UdpSocket;
 
-    use super::{PasswordNote, PasswordStore, RconOutcome, Request, StoreError, exchange, outcome};
+    use super::{
+        PasswordNote, PasswordStore, RconOutcome, Request, StoreError, exchange, local_map_names,
+        outcome,
+    };
 
     #[derive(Default)]
     struct MemoryStore {
@@ -722,13 +720,35 @@ mod tests {
             outcome: RconOutcome::NoAnswer,
             password: PasswordNote::Forgotten,
             players: Vec::new(),
-            maps: Vec::new(),
         })
         .expect("serializes");
 
         assert_eq!(
             shown,
             json!({ "outcome": { "status": "no_answer" }, "password": "forgotten" })
+        );
+    }
+
+    #[test]
+    fn local_maps_include_the_multiplayer_folders_and_drop_the_small_variants() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let maps = temporary.path().join("maps");
+        let header = [
+            b"2015".as_slice(),
+            &19_i32.to_le_bytes(),
+            &42_i32.to_le_bytes(),
+        ]
+        .concat();
+        for name in ["dm/mohdm1", "dm/mohdm1_sml", "obj/obj_team1", "m1l1"] {
+            let path = maps.join(format!("{name}.bsp"));
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+            std::fs::write(path, &header).expect("map");
+        }
+        let index = reveille_core::mapindex::MapIndex::scan(temporary.path()).expect("index");
+
+        assert_eq!(
+            local_map_names(&index),
+            ["dm/mohdm1", "m1l1", "obj/obj_team1"]
         );
     }
 }
